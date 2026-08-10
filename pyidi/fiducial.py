@@ -133,7 +133,8 @@ class Fiducial:
         # Try detecting markers with each dictionary
         for name, aruco_id in ARUCO_DICT.items():
             dictionary = cv2.aruco.getPredefinedDictionary(aruco_id)
-            corners, _, _ = cv2.aruco.detectMarkers(frame, dictionary, parameters=parameters)
+            detector = cv2.aruco.ArucoDetector(dictionary, parameters)
+            corners, _, _ = detector.detectMarkers(frame)
             
             if corners:
                 return name
@@ -175,9 +176,10 @@ class Fiducial:
 
             dictionary = cv2.aruco.getPredefinedDictionary(getattr(cv2.aruco, fiducial_dictionary))
             parameters = cv2.aruco.DetectorParameters()
+            detector = cv2.aruco.ArucoDetector(dictionary, parameters)
 
             for i, frame in tqdm(enumerate(video), total=len(video), dynamic_ncols=True, desc="Fiducial Markers Detection"):
-                corners, ids, _ = cv2.aruco.detectMarkers(frame, dictionary, parameters=parameters)
+                corners, ids, _ = detector.detectMarkers(frame)
 
                 if ids is not None:
                     marker_info = []
