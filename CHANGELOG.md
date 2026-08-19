@@ -79,6 +79,13 @@ point tracked correctly.
   thread, so process-level and thread-level parallelism cannot oversubscribe the
   CPU. The kernel also requests a fork-safe numba threading layer, since the
   OpenMP layer cannot survive `fork`. This applies to both Lucas-Kanade methods.
+- On Linux, the worker pool no longer forks when a GNU OpenMP runtime is loaded
+  into the process, since libgomp terminates any child forked from a process
+  that has used it. numba's own threading layer is fork-safe, but OpenCV and
+  some BLAS and SciPy builds pull in libgomp too, and that was enough to kill
+  every worker. Such sessions now start their workers through `forkserver`.
+  Where forking is safe it is still used, because it shares the video with the
+  workers rather than pickling a copy to each of them.
 - The kernels are compiled once in the parent process before the worker pool is
   created, instead of once per worker.
 - `DirectionalLucasKanade`'s `compute_delta_numba` is now actually compiled; its

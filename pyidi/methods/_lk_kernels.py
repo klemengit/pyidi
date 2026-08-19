@@ -602,6 +602,54 @@ def optimize_frame_directional(frame, points, directions, tx, ty, C_all, previou
         out[p, 1] = new_x
 
 
+def _openmp_is_loaded():
+    """Report whether a GNU OpenMP runtime is mapped into this process.
+
+    :return: True if libgomp is loaded, False if it is not or cannot be checked
+    :rtype: bool
+    """
+    try:
+        with open('/proc/self/maps') as maps:
+            return any('libgomp' in line for line in maps)
+    except OSError:                      # pragma: no cover - not Linux
+        return False
+
+
+def worker_process_context():
+    """Return a multiprocessing context whose workers can survive this process.
+
+    GNU OpenMP kills any child forked from a process that has already used it
+    ("fork() called from a process already using GNU OpenMP, this is unsafe"),
+    so ``fork`` is unusable once anything in the session has started an OpenMP
+    thread team. numba's own threading layer is asked for a fork-safe one at
+    import, but it is not the only candidate: OpenCV, and some BLAS and SciPy
+    builds, pull in libgomp as well. Where one is loaded, start the workers
+    through ``forkserver``, which forks them from a clean process, falling back
+    to ``spawn``.
+
+    Forking is kept wherever it is safe. It hands the workers the video
+    copy-on-write, while the other two methods pickle a copy of it to each of
+    them, which matters when the input is a large in-memory array.
+
+    :return: a multiprocessing context, or None to use the default
+    :rtype: multiprocessing.context.BaseContext or None
+    """
+    import multiprocessing
+
+    if multiprocessing.get_start_method() != 'fork':
+        # Windows and macOS already spawn.
+        return None
+
+    if not _openmp_is_loaded():
+        return None
+
+    for method in ('forkserver', 'spawn'):
+        if method in multiprocessing.get_all_start_methods():
+            return multiprocessing.get_context(method)
+
+    return None                          # pragma: no cover - no alternative
+
+
 def warn_if_fork_unsafe():
     """Warn if numba's threading layer cannot survive ``fork``.
 

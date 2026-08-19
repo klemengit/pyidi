@@ -671,7 +671,10 @@ def multi(video: VideoReader, idi_method: LucasKanade, processes, configuration_
     from concurrent.futures import ProcessPoolExecutor
     import multiprocessing
 
-    _warn_if_fork_unsafe()
+    # Where forking is unsafe this returns a context that does not fork.
+    mp_context = _lk_kernels.worker_process_context()
+    if mp_context is None:
+        _warn_if_fork_unsafe()
 
     if processes < 0:
         processes = cpu_count() + processes
@@ -703,12 +706,13 @@ def multi(video: VideoReader, idi_method: LucasKanade, processes, configuration_
 
     with rich_progress_bar_setup() as progress:
         futures = []
-        with multiprocessing.Manager() as manager:
+        with (mp_context or multiprocessing).Manager() as manager:
             # this is the key - we share some state between our 
             # main process and our worker functions
             _progress = manager.dict()
 
-            with ProcessPoolExecutor(max_workers=processes) as executor:
+            with ProcessPoolExecutor(max_workers=processes,
+                                     mp_context=mp_context) as executor:
                 for n in range(0, len(points_split)):  # iterate over the jobs we need to run
                     # set visible false so we don't have a lot of bars all at once:
                     task_id = progress.add_task(f"task {n} ({len(points_split[n])} points)")

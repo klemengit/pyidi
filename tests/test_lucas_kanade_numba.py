@@ -298,6 +298,12 @@ def test_threading_layer_is_fork_safe():
     import numba
     assert numba.config.THREADING_LAYER == 'forksafe'
 
+    # The configured value is only a request. Check what numba actually
+    # resolved to, which is what forking has to survive.
+    _run(pyidi.VideoReader(input_file=DATA), True)
+    from numba.np.ufunc import parallel as nb_parallel
+    assert nb_parallel.threading_layer() in ('tbb', 'workqueue')
+
 
 def test_fork_after_threaded_run_does_not_break_workers():
     """A threaded run followed by a multiprocessing run must not break the pool.
@@ -317,6 +323,65 @@ def test_fork_after_threaded_run_does_not_break_workers():
         forked = lk.get_displacements(autosave=False)
 
     np.testing.assert_allclose(forked, single, atol=1e-9, rtol=0)
+
+
+def test_openmp_forces_a_non_forking_start_method(monkeypatch):
+    """With libgomp loaded, the pool must not fork."""
+    import multiprocessing
+
+    if multiprocessing.get_start_method() != 'fork':
+        pytest.skip('platform does not fork by default')
+
+    monkeypatch.setattr(_lk_kernels, '_openmp_is_loaded', lambda: False)
+    assert _lk_kernels.worker_process_context() is None, 'should still fork when safe'
+
+    monkeypatch.setattr(_lk_kernels, '_openmp_is_loaded', lambda: True)
+    context = _lk_kernels.worker_process_context()
+    assert context is not None and context.get_start_method() != 'fork'
+
+
+def test_multiprocessing_survives_an_openmp_runtime():
+    """``processes=N`` must work even when GNU OpenMP is already loaded.
+
+    GNU OpenMP terminates any child forked from a process that has used it, so
+    the worker pool has to stop forking once libgomp is in the process. Forcing
+    numba's OpenMP layer is the most reliable way to reproduce that; on CI
+    libgomp arrived through a different dependency and every multiprocessing
+    test died with BrokenProcessPool.
+    """
+    import subprocess
+    import multiprocessing
+
+    if not _lk_kernels.NUMBA_AVAILABLE:
+        pytest.skip('numba is not installed')
+    if multiprocessing.get_start_method() != 'fork':
+        pytest.skip('platform does not fork by default')
+
+    repo = os.path.abspath(os.path.join(my_path, '..'))
+    script = (
+        'import sys, warnings, numpy as np\n'
+        'sys.path.insert(0, %r)\n'
+        'import pyidi\n'
+        'video = pyidi.VideoReader(input_file=%r)\n'
+        'lk = pyidi.LucasKanade(video)\n'
+        'lk.set_points(np.array([[31, 35], [31, 215], [95, 71], [91, 35]]))\n'
+        'lk.configure(verbose=0, show_pbar=False, processes=2, frame_range=(0, 5))\n'
+        'with warnings.catch_warnings():\n'
+        '    warnings.simplefilter("ignore")\n'
+        '    d = lk.get_displacements(autosave=False)\n'
+        'assert d.shape[0] == 4\n'
+        'print("OK")\n'
+    ) % (repo, os.path.abspath(DATA))
+
+    env = dict(os.environ, NUMBA_THREADING_LAYER='omp')
+    result = subprocess.run([sys.executable, '-c', script], env=env, cwd=repo,
+                            capture_output=True, text=True, timeout=900)
+
+    if 'No threading layer could be loaded' in result.stderr:
+        pytest.skip('numba has no OpenMP threading layer on this platform')
+
+    assert 'GNU OpenMP' not in result.stderr, result.stderr
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_warm_up_matches_the_real_call_signature():
