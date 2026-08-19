@@ -5,9 +5,11 @@ on: [push]
 jobs:
   build:
 
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
         python-version: ["3.11", "3.12", "3.13"]
 
     steps:
@@ -17,6 +19,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install system libraries for Qt
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libegl1
@@ -26,6 +29,7 @@ jobs:
           pip install flake8 sdypy-io
           pip install -e ".[dev,qt]"
       - name: Lint with flake8
+        if: runner.os == 'Linux' && matrix.python-version == '3.13'
         run: |
           # stop the build if there are Python syntax errors or undefined names
           flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics

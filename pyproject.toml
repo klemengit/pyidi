@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pyidi"
-version = "1.3.3"
+version = "1.4.0"
 license = "MIT"
 description = "Python Image Displacement Identification."
 readme = "README.md"
@@ -26,7 +26,7 @@ dependencies = [
     "tqdm",
     "mantichora==0.9.7",
     "atpbar",
-    "numba",
+    "numba>=0.59",
     "imageio[pyav]",
     "opencv-contrib-python",
     "qtpy",
