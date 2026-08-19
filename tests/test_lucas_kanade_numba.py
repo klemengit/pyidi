@@ -87,30 +87,74 @@ def test_falls_back_for_non_cubic_interpolation():
     assert displacements.shape == (len(POINTS), video.N, 2)
 
 
-def test_degenerate_roi_raises():
-    """A flat ROI raises the same error in both implementations."""
+def test_untrackable_point_becomes_nan_and_warns():
+    """A point that cannot be tracked is NaN and warns, it does not abort.
+
+    Both a flat ROI (singular gradient matrix) and a runaway iteration are
+    handled this way, in both implementations.
+    """
     video = pyidi.VideoReader(input_file=DATA)
     # This part of the synthetic image is uniform, so the gradient matrix there
     # is singular.
     flat = np.array([[121, 60]])
 
     for use_compiled_kernel in (False, True):
-        with pytest.raises(ValueError, match='[Dd]egenerate ROI'):
-            _run(video, use_compiled_kernel=use_compiled_kernel, points=flat)
+        lk = pyidi.LucasKanade(video)
+        lk.set_points(flat)
+        lk.configure(verbose=0, show_pbar=False, processes=1, use_compiled_kernel=use_compiled_kernel)
+
+        with pytest.warns(UserWarning, match='could not be tracked'):
+            displacements = lk.get_displacements(autosave=False)
+
+        assert displacements.shape == (1, video.N, 2)
+        assert np.isnan(displacements).any(), 'the lost point should be NaN'
+        assert 0 in lk.failed_points
 
 
-def test_divergence_is_reported_not_returned_as_nan():
-    """An ill-conditioned point raises instead of silently returning NaN.
+def test_one_bad_point_does_not_lose_the_good_ones():
+    """The whole analysis must survive a single untrackable point.
 
-    This point sits on a single straight edge: there is gradient across the edge
-    but almost none along it, so the optimization runs away. The compiled kernel
-    must report that rather than propagating a non-finite displacement.
+    This is the case that matters in practice: a few of several hundred points
+    are badly placed, and losing every good point with them is not acceptable.
     """
     video = pyidi.VideoReader(input_file=DATA)
-    edge = np.array([[8, 60]])
+    flat = [121, 60]                       # uniform region, cannot be tracked
+    points = np.vstack([POINTS, [flat]])
 
-    with pytest.raises(ValueError, match='[Dd]iverged|[Dd]egenerate'):
-        _run(video, use_compiled_kernel=True, points=edge)
+    lk = pyidi.LucasKanade(video)
+    lk.set_points(points)
+    lk.configure(verbose=0, show_pbar=False, processes=1, use_compiled_kernel=True)
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        displacements = lk.get_displacements(autosave=False)
+
+    good = displacements[:len(POINTS)]
+    bad = displacements[len(POINTS):]
+
+    assert np.isfinite(good).all(), 'the good points must be unaffected'
+    assert np.isnan(bad).any(), 'the bad point must be NaN'
+    assert set(lk.failed_points) == {len(POINTS)}
+
+    # and they must match a run without the bad point at all
+    clean = _run(video, use_compiled_kernel=True)
+    np.testing.assert_allclose(good, clean, atol=1e-9, rtol=0)
+
+
+def test_failed_points_records_frame_and_reason():
+    """``failed_points`` carries enough detail to diagnose the failure."""
+    video = pyidi.VideoReader(input_file=DATA)
+
+    lk = pyidi.LucasKanade(video)
+    lk.set_points(np.array([[121, 60]]))
+    lk.configure(verbose=0, show_pbar=False, processes=1, use_compiled_kernel=True)
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        lk.get_displacements(autosave=False)
+
+    record = lk.failed_points[0]
+    assert 'frame' in record and 'status' in record
+    assert record['status'] in (_lk_kernels.STATUS_SINGULAR,
+                                _lk_kernels.STATUS_DIVERGED)
 
 
 def test_isfinite_guard_is_live():
@@ -179,6 +223,49 @@ def test_spline_kernel_clamps_outside_its_domain():
         expected = spline(np.arange(roi) + offset, np.arange(roi) + offset)
         _lk_kernels._eval_spline_grid(tx, ty, coeffs, offset, offset, out, *scratch)
         np.testing.assert_allclose(out, expected, atol=1e-10, rtol=0)
+
+
+def test_matches_numpy_for_large_previous_displacements():
+    """The two paths agree even when the iteration leaves the spline domain.
+
+    With a previous displacement of several pixels the optimization starts far
+    from the solution and the iterate can leave the region of interest. This
+    pins the clamping fix at the level of a whole frame.
+    """
+    video = pyidi.VideoReader(input_file=DATA)
+    frame = np.asarray(video.get_frame(1))
+    rng = np.random.default_rng(11)
+
+    def prepare():
+        lk = pyidi.LucasKanade(video)
+        lk.set_points(POINTS)
+        lk.configure(verbose=0, show_pbar=False, processes=1)
+        lk.image_size = (video.image_height, video.image_width)
+        lk.displacements = np.zeros((len(POINTS), 2, 2))
+        lk.failed_points = {}
+        lk.warnings = []
+        lk._interpolate_reference(video)
+        return lk
+
+    for scale in (1.0, 2.5, 5.0):
+        previous = rng.normal(0, scale, (len(POINTS), 2))
+
+        reference = prepare()
+        reference.displacements[:, 0, :] = previous
+        compiled = prepare()
+        compiled.displacements[:, 0, :] = previous
+        compiled._prepare_numba_reference()
+
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            reference._optimize_frame_numpy(frame, 1, 1)
+            compiled._optimize_frame_numba(frame, 1, 1)
+
+        a = reference.displacements[:, 1, :]
+        b = compiled.displacements[:, 1, :]
+        assert np.array_equal(np.isnan(a), np.isnan(b))
+        finite = ~np.isnan(a)
+        np.testing.assert_allclose(a[finite], b[finite], atol=1e-9, rtol=0)
 
 
 def test_multiprocessing_matches_single_process():

@@ -190,6 +190,10 @@ class LucasKanade(IDIMethod):
 
         self.warnings = []
 
+        # Points that could no longer be tracked, keyed by point index. They are
+        # NaN in the results from the frame at which they were lost.
+        self.failed_points = {}
+
         # Precomputables
         start_time = time.time()
 
@@ -239,6 +243,8 @@ class LucasKanade(IDIMethod):
                 QApplication.processEvents()
                 
         del self.temp_disp
+
+        self._warn_about_failed_points()
 
         if self.verbose:
             full_time = time.time() - start_time
@@ -298,6 +304,70 @@ class LucasKanade(IDIMethod):
         self._nb_clamped = np.empty(len(splines), dtype=np.bool_)
         self._edge_warning_issued = False
 
+    def _displacement_is_sane(self, displacement):
+        """Check that a displacement is finite and smaller than the image.
+
+        :param displacement: (dy, dx) in pixels
+        :type displacement: array-like of size 2
+        :return: False if the value is non-finite or physically impossible
+        :rtype: bool
+        """
+        return bool(
+            np.all(np.isfinite(displacement))
+            and abs(displacement[0]) <= self.image_size[0]
+            and abs(displacement[1]) <= self.image_size[1]
+        )
+
+    def _record_failed_point(self, p, frame, status):
+        """Record a point that could no longer be tracked.
+
+        The first failure is reported immediately so that long analyses give
+        early feedback; the rest are collected into ``failed_points`` and
+        summarised once the analysis finishes.
+
+        :param p: index of the point
+        :type p: int
+        :param frame: frame number at which the point was lost
+        :type frame: int
+        :param status: one of the ``_lk_kernels.STATUS_*`` constants
+        :type status: int
+        """
+        if p in self.failed_points:
+            return
+
+        self.failed_points[p] = {'frame': frame, 'status': status}
+
+        if len(self.failed_points) == 1:
+            reason = (
+                'the gradient matrix became singular (a flat or edge-only ROI)'
+                if status == _lk_kernels.STATUS_SINGULAR else
+                'the optimization ran away (a poorly conditioned ROI, for example a '
+                'single straight edge with no gradient along it)'
+            )
+            warnings.warn(
+                f'Point {p} (position {self.points[p]}) could not be tracked past frame '
+                f'{frame}: {reason}. Its displacements are set to NaN from that frame on '
+                f'and the analysis continues. Any further lost points are summarised at '
+                f'the end; see the failed_points attribute.'
+            )
+
+    def _warn_about_failed_points(self):
+        """Summarise the points lost during the analysis."""
+        if not self.failed_points:
+            return
+
+        indices = sorted(self.failed_points)
+        shown = ', '.join(str(p) for p in indices[:10])
+        if len(indices) > 10:
+            shown += f', ... ({len(indices) - 10} more)'
+
+        warnings.warn(
+            f'{len(indices)} of {len(self.points)} points could not be tracked and are '
+            f'NaN from the frame at which they were lost: {shown}. Reposition them onto '
+            f'features with gradient in both directions, or increase roi_size. '
+            f'Per-point detail is in the failed_points attribute.'
+        )
+
     def _optimize_frame_numpy(self, frame, ii, i):
         """Run the reference NumPy optimization for all points of a single frame.
 
@@ -311,6 +381,11 @@ class LucasKanade(IDIMethod):
         # Iterate over points.
         for p, point in enumerate(self.points):
 
+            if p in self.failed_points:
+                # Already lost at an earlier time step.
+                self.displacements[p, ii, :] = np.nan
+                continue
+
             # start optimization with previous optimal parameter values
             d_init = np.round(self.displacements[p, ii-1, :]).astype(int)
             d_res = self.displacements[p, ii-1, :] - d_init
@@ -318,17 +393,29 @@ class LucasKanade(IDIMethod):
             yslice, xslice = self._padded_slice(point+d_init, self.roi_size, self.image_size, 1)
             G = frame[yslice, xslice]
 
-            displacements = self.optimize_translations(
-                G=G,
-                F_spline=self.interpolation_splines[p],
-                maxiter=self.max_nfev,
-                tol=self.tol,
-                d_subpixel_init=-d_res,
-                point_index=p,
-                frame=i
-            )
+            try:
+                displacements = self.optimize_translations(
+                    G=G,
+                    F_spline=self.interpolation_splines[p],
+                    maxiter=self.max_nfev,
+                    tol=self.tol,
+                    d_subpixel_init=-d_res,
+                    point_index=p,
+                    frame=i
+                )
+            except ValueError:
+                self.displacements[p, ii, :] = np.nan
+                self._record_failed_point(p, i, _lk_kernels.STATUS_SINGULAR)
+                continue
 
-            self.displacements[p, ii, :] = displacements + d_init
+            result = displacements + d_init
+            if self._displacement_is_sane(result):
+                self.displacements[p, ii, :] = result
+            else:
+                # The iteration ran away without the gradient matrix ever becoming
+                # exactly singular. Left alone this returns silent nonsense.
+                self.displacements[p, ii, :] = np.nan
+                self._record_failed_point(p, i, _lk_kernels.STATUS_DIVERGED)
 
     def _optimize_frame_numba(self, frame, ii, i):
         """Run the compiled kernel for all points of a single frame.
@@ -357,23 +444,6 @@ class LucasKanade(IDIMethod):
             self.tol,
         )
 
-        if self._nb_status.any():
-            p = int(np.argmax(self._nb_status != _lk_kernels.STATUS_OK))
-            if self._nb_status[p] == _lk_kernels.STATUS_SINGULAR:
-                raise ValueError(
-                    f"Degenerate ROI at point index {p} (position {self.points[p]}), frame {i}. "
-                    f"The gradient matrix is singular (flat region or single-direction gradient). "
-                    f"Reposition this point away from uniform or edge-only regions."
-                )
-            raise ValueError(
-                f"Diverged at point index {p} (position {self.points[p]}), frame {i}. "
-                f"The optimization ran away to a non-finite displacement, which usually "
-                f"means the ROI is poorly conditioned (for example a single straight edge, "
-                f"giving no gradient across the edge direction). "
-                f"Reposition this point onto a feature with gradient in both directions, "
-                f"or increase roi_size."
-            )
-
         if not self._edge_warning_issued and self._nb_clamped.any():
             warnings.warn('Reached image edge. The displacement optimization ' +
                 'algorithm may not converge, or selected points might be too close ' +
@@ -381,6 +451,15 @@ class LucasKanade(IDIMethod):
             self._edge_warning_issued = True
 
         self.displacements[:, ii, :] = self._nb_out
+
+        # A point that fails is lost from this time step onwards. Mark it NaN and
+        # carry on with the rest: in a several-hundred-point analysis a handful of
+        # badly placed points should not throw away every good one.
+        failed = self._nb_status != _lk_kernels.STATUS_OK
+        if failed.any():
+            self.displacements[failed, ii, :] = np.nan
+            for p in np.flatnonzero(failed):
+                self._record_failed_point(int(p), i, int(self._nb_status[p]))
 
     def optimize_translations(self, G, F_spline, maxiter, tol, d_subpixel_init=(0, 0),
                               point_index=None, frame=None):
