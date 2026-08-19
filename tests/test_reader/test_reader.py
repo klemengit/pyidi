@@ -1,4 +1,5 @@
 import sys, os
+import pytest
 import pyMRAW
 import numpy as np
 
@@ -47,16 +48,16 @@ def test_get_frames():
     # print('test_get_frames: passed')
 
     weights = list(np.ones(3) / 3)
-    video.configure(use_channel='RGB', channel_weights=weights)
+    video.configure(channel_weights=weights)
     assert video.get_frames().shape[0] == 10
 
-    video.configure(use_channel='R')
+    video.configure(channel='R')
     assert video.get_frames().shape[0] == 10
 
-    video.configure(use_channel='G')
+    video.configure(channel='G')
     assert video.get_frames().shape[0] == 10
 
-    video.configure(use_channel='B')
+    video.configure(channel='B')
     assert video.get_frames().shape[0] == 10
 
     # print('test_get_frames_mp4: passed')
@@ -87,19 +88,28 @@ def test_get_frames_mp4():
     assert video.get_frames((1, 5)).shape[0] == 4
 
     weights = list(np.ones(3) / 3)
-    video.configure(use_channel='RGB', channel_weights=weights)
+    video.configure(channel_weights=weights)
     assert video.get_frames().shape[0] == 10
 
-    video.configure(use_channel='R')
+    video.configure(channel='R')
     assert video.get_frames().shape[0] == 10
 
-    video.configure(use_channel='G')
+    video.configure(channel='G')
     assert video.get_frames().shape[0] == 10
 
-    video.configure(use_channel='B')
+    video.configure(channel='B')
     assert video.get_frames().shape[0] == 10
 
     # print('test_get_frames_mp4: passed')
+
+def test_get_frames_cine():
+    pytest.importorskip("cine_reader")
+    video = pyidi.VideoReader(input_file='./data/data_small_cine.cine')
+    assert video.get_frame(0).shape == (32, 256)
+    assert video.get_frames().shape[0] == 235
+    assert video.get_frames(4).shape[0] == 4
+    assert video.get_frames((1, 5)).shape[0] == 4
+    return None
 
 if __name__ == '__main__':
     test_png_stream()
@@ -109,3 +119,4 @@ if __name__ == '__main__':
     test_get_frames_mraw()
     test_get_frames_ndarray()
     test_get_frames_mp4()
+    test_get_frames_cine()

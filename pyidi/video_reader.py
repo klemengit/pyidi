@@ -13,21 +13,12 @@ from . import slow_reader as _slow_reader
 
 PHORTRON_HEADER_FILE = {"cih", "cihx"}
 SLOW_FILE = {"slow"}
+CINE_FILE = {"cine"}
 SUPPORTED_IMAGE_FORMATS = {"png", "tif", "tiff", "bmp", "jpg", "jpeg", "gif"}
 PYAV_SUPPORTED_VIDEO_FORMATS = {
-    "avi",
-    "mkv",
-    "mp4",
-    "mov",
-    "m4v",
-    "wmv",
-    "webm",
-    "flv",
-    "ogg",
-    "ogv",
-}
+    "avi", "mkv", "mp4", "mov", "m4v", "wmv", "webm", "flv", "ogg", "ogv"
+    }
 CHANNELS = {"R": 0, "G": 1, "B": 2}
-
 
 class VideoReader:
     """
@@ -71,7 +62,9 @@ class VideoReader:
                     "Root directory must be provided for np.ndarray input file!"
                 )
 
-            self.configure(root=root)
+            self.root = root
+            if not os.path.exists(self.root):  # Create the folder if it does not exist
+                os.mkdir(self.root)
 
             self.file_format = "np.ndarray"
             self.input_file = "ndarray"
@@ -92,6 +85,9 @@ class VideoReader:
         elif self.file_format in SLOW_FILE:
             self._initialise_slow_files(input_file)
 
+        elif self.file_format in CINE_FILE:
+            self._initialise_cine_files(input_file)
+    
         elif self.file_format in SUPPORTED_IMAGE_FORMATS:
             self._initalise_image_files(input_file)
 
@@ -110,8 +106,6 @@ class VideoReader:
         Supported keyword arguments:
 
         - ``fps`` *(int)*: Frames per second.
-        - ``root`` *(str)*: Root directory for output or image sequence files.
-          Used with "np.ndarray".The directory is created if it does not exist.
         - ``video_format`` *(str)*: PyAV pixel format string used when reading frames.
           (default: "gray", "gray16be", "gray16le"). For custom selection 
           of image channels, or using custom weights for conversion to monochrome,
@@ -129,14 +123,7 @@ class VideoReader:
             ``channel_weights`` is not a list/tuple of length 3.
         """
         if "fps" in kwargs:
-            self.fps = int(kwargs["fps"])
-
-        if "root" in kwargs:
-            if not isinstance(kwargs["root"], str):
-                raise ValueError("Root must be a string!")
-            self.root = kwargs["root"]
-            if not os.path.exists(self.root):  # Create the folder if it does not exist
-                os.mkdir(self.root)
+            self.fps = float(kwargs["fps"])
 
         if "video_format" in kwargs:
             if not isinstance(kwargs["video_format"], str):
@@ -183,6 +170,9 @@ class VideoReader:
         ):
             image = self._frames[frame_number]
 
+        elif self.file_format in CINE_FILE:
+            image = self._get_frame_from_cine(frame_number, *args, **kwargs)
+
         elif self.file_format in SUPPORTED_IMAGE_FORMATS:
             image = self._get_frame_from_image(frame_number, *args, **kwargs)
 
@@ -211,7 +201,7 @@ class VideoReader:
         :type kwargs: dict
         """
         if not isinstance(frame_range, (int, list, tuple, type(None))):
-            raise ValueError(
+            raise TypeError(
                 "Unsupported frame range! Supported types are int, list and tuple."
             )
 
@@ -242,6 +232,9 @@ class VideoReader:
         ):
             frames = self._frames[frames_start:frames_end]
 
+        elif self.file_format in CINE_FILE:
+            frames = self._get_frames_from_cine(frames_start, n_frames)
+
         else:
             frames = np.zeros(
                 (n_frames, self.image_height, self.image_width), dtype=int
@@ -250,6 +243,30 @@ class VideoReader:
                 frames[i] = self.get_frame(i + frames_start, *args, **kwargs)
 
         return frames
+
+    def _get_frame_from_cine(self, frame_number):
+        """Reads a single frame from the .cine file.
+
+        :param frame_number: Zero-based frame index
+        :type frame_number: int
+        :return: monochrome image as np.ndarray
+        """
+        # Map 0-based frame index to original cine frame numbers
+        cine_frame_idx = self._cine.first_frame_number + frame_number
+        self._cine.load_frame(cine_frame_idx)
+        return self._cine.frame
+
+    def _get_frames_from_cine(self, frames_start, n_frames):
+        """Reads a range of frames from the .cine file.
+
+        :param frames_start: Start frame index
+        :type frames_start: int
+        :param n_frames: Number of frames to read
+        :type n_frames: int
+        :return: np.ndarray containing the frames in the specified range
+        """
+        cine_frame_idx_start = self._cine.first_frame_number + frames_start
+        return self._cine.load_frames_batch(cine_frame_idx_start, n_frames).transpose(2, 0, 1)
 
     def _get_frame_from_image(self, frame_number):
         """Reads the frame from the image stream, or image file containing multiple images.
@@ -397,6 +414,38 @@ class VideoReader:
             self.configure(fps=self._slow.fr_rate)
         self.info = self._slow.meta
 
+    def _initialise_cine_files(self, input_file):
+        """Initialise reader state for ``.cine`` recordings.
+
+        :param input_file: Path to a ``.cine`` file
+        :type input_file: str
+        """
+        try:
+            from cine_reader import Cine
+        except ImportError as e:
+            raise ImportError(
+                "Reading .cine files requires the 'cine-reader' package. "
+                "Please install it using: pip install cine-handler"
+            ) from e
+
+        self._cine = Cine(input_file)
+        self._cine.keep_annotations = False
+        setup = self._cine.camera_setup
+        i_hdr = self._cine.image_header
+        self.N = self._cine.total_frames
+        self.image_width = i_hdr.biWidth
+        self.image_height = abs(i_hdr.biHeight)
+        if not getattr(self, "fps", False) and isinstance(setup.FrameRate, (int, float)):
+            self.configure(fps=setup.FrameRate)
+        self.info = {
+            'Total Frames': self._cine.total_frames,
+            'biWidth': self.image_width,
+            'biHeight': self.image_height,
+            'biBitCount': i_hdr.biBitCount,
+            'FrameRate': setup.FrameRate,
+            'ShutterNs': setup.ShutterNs,
+        }
+
     def _initalise_image_files(self, input_file):
         """Initialise reader state for image files and image sequences.
 
@@ -442,6 +491,8 @@ class VideoReader:
             self.N = image_prop.n_images
             self.image_width = image_prop.shape[2]
             self.image_height = image_prop.shape[1]
+            if not getattr(self, "fps", False):
+                self.configure(fps=image_meta.get("fps", None))
 
     def _initialise_video_files(self, input_file):
         """Initialise reader state for video containers handled by ``pyav``.
@@ -482,6 +533,9 @@ class VideoReader:
         elif hasattr(self, "_slow") and self.file_format in SLOW_FILE:
             del self._frames
             del self._slow
+        elif hasattr(self, "_cine") and self.file_format in CINE_FILE:
+            self._cine.close_file()
+            del self._cine
 
     def gui(self):
         """Starts the GUI for pyIDI."""
