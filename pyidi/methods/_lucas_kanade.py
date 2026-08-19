@@ -15,7 +15,6 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from tqdm import tqdm
 import pickle
-import numba as nb
 import rich.progress
 
 from psutil import cpu_count
@@ -24,6 +23,7 @@ from ..video_reader import VideoReader
 
 from .idi_method import IDIMethod
 from . import _lk_kernels
+from ._lk_kernels import NUMBA_AVAILABLE, nb
 from ..progress_bar import progress_bar, rich_progress_bar_setup
 try:
     from qtpy.QtWidgets import QApplication
@@ -74,10 +74,11 @@ class LucasKanade(IDIMethod):
         :param frame_range: Part of the video to process. If "full", a full video is processed. If first element of tuple is not 0,
             a appropriate reference image should be chosen.
         :type frame_range: tuple or "full"
-        :param use_compiled_kernel: use the compiled (numba) kernel, which fuses the inner
-            optimization loop and parallelizes over points. Results are identical
-            to the pure NumPy path to within floating-point round-off. Falls back
-            to the NumPy path automatically if ``int_order != 3``. Defaults to True.
+        :param use_compiled_kernel: use the compiled (numba) kernel, which fuses the
+            inner optimization loop and parallelizes over points. Results are identical
+            to the pure NumPy path to within floating-point round-off. Falls back to
+            the NumPy path automatically if numba is not installed or if
+            ``int_order != 3``. Defaults to True.
         :type use_compiled_kernel: bool, optional
         """
         # The arguments are mapped to the class attributes
@@ -269,12 +270,25 @@ class LucasKanade(IDIMethod):
         if not getattr(self, 'use_compiled_kernel', True):
             return False
 
+        if not NUMBA_AVAILABLE:
+            if not getattr(self, '_numba_warning_issued', False):
+                warnings.warn(
+                    'numba is not installed, so the compiled kernel is unavailable. '
+                    'Falling back to the NumPy implementation, which is a lot slower. '
+                    'Install numba for the fast path.'
+                )
+                self._numba_warning_issued = True
+            return False
+
         # The kernel implements cubic (de Boor) spline evaluation only.
         if self.int_order != 3:
-            warnings.warn(
-                f'The compiled kernel supports int_order=3 only (got {self.int_order}). '
-                'Falling back to the NumPy implementation.'
-            )
+            if not getattr(self, '_int_order_warning_issued', False):
+                warnings.warn(
+                    f'The compiled kernel supports int_order=3 only (got {self.int_order}). '
+                    'Falling back to the NumPy implementation, which is slower. '
+                    'Use int_order=3 for the compiled kernel.'
+                )
+                self._int_order_warning_issued = True
             return False
 
         return True
@@ -490,7 +504,7 @@ class LucasKanade(IDIMethod):
         Gx, Gy = tools.get_gradient(G_float)
         G_float_clipped = G_float[1:-1, 1:-1]
 
-        A_inv = compute_inverse_numba(Gx, Gy)
+        A_inv = compute_inverse(Gx, Gy)
 
         if A_inv is None:
             point_info = f"index {point_index}" if point_index is not None else "unknown"
@@ -517,7 +531,7 @@ class LucasKanade(IDIMethod):
             x_f += delta[1]
 
             F = F_spline(y_f, x_f)
-            delta, error = compute_delta_numba(F, G_float_clipped, Gx, Gy, A_inv)
+            delta, error = compute_delta(F, G_float_clipped, Gx, Gy, A_inv)
 
             displacement += delta
             if error < tol:
@@ -713,6 +727,16 @@ def multi(video: VideoReader, idi_method: LucasKanade, processes, configuration_
                     out.append(future.result())
 
                 out1 = sorted(out, key=lambda x: x[1])
+
+                # Each worker numbers its points from zero, so shift them back
+                # onto the full point list before merging.
+                idi_method.failed_points = {}
+                offset = 0
+                for result in out1:
+                    for local, detail in result[2].items():
+                        idi_method.failed_points[offset + local] = detail
+                    offset += len(result[0])
+
                 out1 = np.concatenate([d[0] for d in out1])
 
     t = time.time() - t_start
@@ -751,19 +775,19 @@ def _warm_up_kernels(video: VideoReader, method_kwargs: dict):
         pad = int(method_kwargs.get('pad', 2))
         int_order = int(method_kwargs.get('int_order', 3))
         tol = float(method_kwargs.get('tol', 1e-8))
-        use_compiled_kernel = method_kwargs.get('use_compiled_kernel', True)
+        use_compiled = method_kwargs.get('use_compiled_kernel', True) and NUMBA_AVAILABLE
 
         # The compiled code is specialized on the dtype of the frames, so warm
         # it with a real frame rather than a synthetic one.
         frame = np.asarray(video.get_frame(0))
 
-        if not use_compiled_kernel or int_order != 3:
+        if not use_compiled or int_order != 3:
             # The NumPy path still goes through compiled helpers. Mirror the
             # array layouts of the real call so the same specialization is hit.
             subset = frame[:roi_size[0] + 2, :roi_size[1] + 2].astype(np.float64)
             Gx, Gy = tools.get_gradient(subset)
-            compute_inverse_numba(Gx, Gy)
-            compute_delta_numba(np.zeros(Gx.shape), subset[1:-1, 1:-1], Gx, Gy, np.eye(2))
+            compute_inverse(Gx, Gy)
+            compute_delta(np.zeros(Gx.shape), subset[1:-1, 1:-1], Gx, Gy, np.eye(2))
             return
 
         grid_y = np.arange(-pad, roi_size[0] + pad)
@@ -842,24 +866,32 @@ def worker(points, idi_kwargs, method_kwargs, i, progress, task_id):
     # Each worker gets a single numba thread. Without this, every process would
     # start a full thread pool of its own and the processes would oversubscribe
     # the CPU, which is slower than either form of parallelism on its own.
-    nb.set_num_threads(1)
+    if NUMBA_AVAILABLE:
+        _lk_kernels.nb.set_num_threads(1)
 
     video = VideoReader(**idi_kwargs)
     idi = LucasKanade(video)
     idi.configure(**method_kwargs)
     idi.configure_multiprocessing(i+1, progress, task_id) # configure the multiprocessing settings
     idi.set_points(points)
-    return idi.get_displacements(autosave=False), i
+    displacements = idi.get_displacements(autosave=False)
+
+    # The point indices are local to this worker; the parent maps them back.
+    return displacements, i, getattr(idi, 'failed_points', {})
 
 
-@nb.njit(cache=True)
-def _compute_inverse(Gx, Gy, tol=1e-10):
+# The two helpers below exist in a compiled and a NumPy flavour. Explicit loops
+# are much faster once numba compiles them, but much slower than vectorised NumPy
+# when it is not installed, so the right one is bound at import time.
+
+
+def _inverse_loops(Gx, Gy, tol=1e-10):
     """
-    Compute the inverse of the gradient matrix for Lucas-Kanade optimization.
+    Compute the inverse of the gradient matrix, with explicit loops.
 
-    Compiled counterpart of :func:`compute_inverse_numba`. The singular case is
-    reported through a boolean flag rather than ``None``, because numba cannot
-    type a function that returns either an array or ``None``.
+    The singular case is reported through a boolean flag rather than ``None``,
+    because numba cannot type a function that returns either an array or
+    ``None``.
 
     :param Gx: x-gradient of the image subset
     :param Gy: y-gradient of the image subset
@@ -890,24 +922,24 @@ def _compute_inverse(Gx, Gy, tol=1e-10):
     return A_inv, True
 
 
-def compute_inverse_numba(Gx, Gy, tol=1e-10):
+def _inverse_vectorised(Gx, Gy, tol=1e-10):
+    """Vectorised counterpart of :func:`_inverse_loops`, for use without numba."""
+    Gx2 = np.sum(Gx**2)
+    Gy2 = np.sum(Gy**2)
+    GxGy = np.sum(Gx * Gy)
+
+    det = GxGy**2 - Gx2*Gy2
+    if abs(det) < tol:
+        return np.empty((2, 2)), False
+
+    return np.array([[GxGy, -Gx2], [-Gy2, GxGy]]) / det, True
+
+
+def _delta_loops(F, G, Gx, Gy, A_inv):
+    """Least-squares translation update, with explicit loops.
+
+    :return: ``(delta, error)``, the update and its norm
     """
-    Compute the inverse of the gradient matrix for Lucas-Kanade optimization.
-
-    :param Gx: x-gradient of the image subset
-    :param Gy: y-gradient of the image subset
-    :param tol: tolerance for detecting singular matrix
-    :return: inverse matrix, or None if the matrix is near-singular
-    """
-    A_inv, ok = _compute_inverse(np.ascontiguousarray(Gx, dtype=np.float64),
-                                 np.ascontiguousarray(Gy, dtype=np.float64), tol)
-    if not ok:
-        return None
-    return A_inv
-
-
-@nb.njit(cache=True)
-def compute_delta_numba(F, G, Gx, Gy, A_inv):
     b0 = 0.0
     b1 = 0.0
     for i in range(F.shape[0]):
@@ -923,3 +955,35 @@ def compute_delta_numba(F, G, Gx, Gy, A_inv):
     error = np.sqrt(delta[0]**2 + delta[1]**2)
     return delta, error
 
+
+def _delta_vectorised(F, G, Gx, Gy, A_inv):
+    """Vectorised counterpart of :func:`_delta_loops`, for use without numba."""
+    F_G = G - F
+    b = np.array([np.sum(Gx*F_G), np.sum(Gy*F_G)])
+    delta = np.dot(A_inv, b)
+
+    return delta, np.sqrt(np.sum(delta**2))
+
+
+if NUMBA_AVAILABLE:
+    _compute_inverse = nb.njit(cache=True)(_inverse_loops)
+    compute_delta = nb.njit(cache=True)(_delta_loops)
+else:                                    # pragma: no cover - environment dependent
+    _compute_inverse = _inverse_vectorised
+    compute_delta = _delta_vectorised
+
+
+def compute_inverse(Gx, Gy, tol=1e-10):
+    """
+    Compute the inverse of the gradient matrix for Lucas-Kanade optimization.
+
+    :param Gx: x-gradient of the image subset
+    :param Gy: y-gradient of the image subset
+    :param tol: tolerance for detecting singular matrix
+    :return: inverse matrix, or None if the matrix is near-singular
+    """
+    A_inv, ok = _compute_inverse(np.ascontiguousarray(Gx, dtype=np.float64),
+                                 np.ascontiguousarray(Gy, dtype=np.float64), tol)
+    if not ok:
+        return None
+    return A_inv

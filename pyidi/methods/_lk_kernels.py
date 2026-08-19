@@ -28,15 +28,41 @@ implementation to within floating-point round-off.
 import os
 
 import numpy as np
-import numba as nb
 
-# numba's OpenMP threading layer is not safe across ``fork``. If the thread pool
-# has been started in the parent process (by any single-process analysis) and the
-# user then runs with ``processes=N``, the forked workers die with
-# BrokenProcessPool. Ask numba for a layer that is safe under fork, unless the
-# user has explicitly chosen one through the environment.
-if 'NUMBA_THREADING_LAYER' not in os.environ:
-    nb.config.THREADING_LAYER = 'forksafe'
+try:
+    import numba as nb
+    NUMBA_AVAILABLE = True
+except ImportError:                      # pragma: no cover - environment dependent
+    nb = None
+    NUMBA_AVAILABLE = False
+
+if NUMBA_AVAILABLE:
+    njit = nb.njit
+    prange = nb.prange
+
+    # numba's OpenMP threading layer is not safe across ``fork``. If the thread
+    # pool has been started in the parent process (by any single-process
+    # analysis) and the user then runs with ``processes=N``, the forked workers
+    # die with BrokenProcessPool. Ask numba for a layer that is safe under fork,
+    # unless the user has explicitly chosen one through the environment.
+    if 'NUMBA_THREADING_LAYER' not in os.environ:
+        nb.config.THREADING_LAYER = 'forksafe'
+else:                                    # pragma: no cover - environment dependent
+    def njit(*args, **kwargs):
+        """No-op stand-in for ``numba.njit`` when numba is not installed.
+
+        The kernels below are then plain Python and far too slow to use, so
+        ``LucasKanade`` never selects them; this only keeps the module
+        importable so the rest of pyidi works without numba.
+        """
+        def decorator(func):
+            return func
+
+        if args and callable(args[0]):
+            return args[0]
+        return decorator
+
+    prange = range
 
 # Cubic splines are the only degree used by the fused kernel. The reference
 # implementation supports arbitrary ``int_order``, so ``LucasKanade`` falls back
@@ -49,7 +75,7 @@ STATUS_SINGULAR = 1     # gradient matrix is singular: flat or edge-only ROI
 STATUS_DIVERGED = 2     # the iteration ran away to a non-finite displacement
 
 
-@nb.njit(cache=True, inline="always")
+@njit(cache=True, inline="always")
 def _is_sane(value, limit):
     """Check that a displacement is finite and smaller than the image.
 
@@ -61,7 +87,7 @@ def _is_sane(value, limit):
     return np.isfinite(value) and abs(value) <= limit
 
 
-@nb.njit(cache=True, inline="always")
+@njit(cache=True, inline="always")
 def _basis(t, x, n_coef, out):
     """
     Evaluate the ``_K + 1`` non-zero cubic B-spline basis functions at ``x``.
@@ -113,7 +139,7 @@ def _basis(t, x, n_coef, out):
     return span
 
 
-@nb.njit(cache=True, inline="always")
+@njit(cache=True, inline="always")
 def _eval_spline_grid(tx, ty, C, dy, dx, F, span_y, span_x, basis_y, basis_x, buf):
     """
     Evaluate a tensor-product cubic spline on the shifted regular grid
@@ -165,7 +191,7 @@ def _eval_spline_grid(tx, ty, C, dy, dx, F, span_y, span_x, basis_y, basis_x, bu
             F[a, b] = acc
 
 
-@nb.njit(cache=True)
+@njit(cache=True)
 def _optimize_translation(G, tx, ty, C, maxiter, tol, dy_init, dx_init):
     """
     Fused Lucas-Kanade optimisation for a single region of interest.
@@ -268,7 +294,7 @@ def _optimize_translation(G, tx, ty, C, maxiter, tol, dy_init, dx_init):
     return -disp_y, -disp_x, STATUS_OK
 
 
-@nb.njit(cache=True, parallel=True)
+@njit(cache=True, parallel=True)
 def optimize_frame(frame, points, tx, ty, C_all, previous, out, status, clamped,
                    roi_h, roi_w, pad, maxiter, tol):
     """
@@ -302,7 +328,7 @@ def optimize_frame(frame, points, tx, ty, C_all, previous, out, status, clamped,
     half_h = roi_h // 2 + pad
     half_w = roi_w // 2 + pad
 
-    for p in nb.prange(n_points):
+    for p in prange(n_points):
         # Start the optimisation from the previous optimal parameters: the
         # integer part re-centres the slice, the remainder is the sub-pixel
         # initial guess.

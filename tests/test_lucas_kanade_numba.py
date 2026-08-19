@@ -340,3 +340,102 @@ def test_warm_up_matches_the_real_call_signature():
 
     new = set(_lk_kernels.optimize_frame.signatures) - warmed
     assert not new, f'the real call compiled a signature the warm-up missed: {new}'
+
+
+def test_failed_points_survive_multiprocessing():
+    """Failures found in worker processes reach the caller, with global indices.
+
+    Each worker numbers its own slice of points from zero, so the indices have to
+    be mapped back onto the full point list.
+    """
+    video = pyidi.VideoReader(input_file=DATA)
+    flat = [121, 60]                       # uniform region, cannot be tracked
+    points = np.vstack([POINTS, [flat]])
+
+    lk = pyidi.LucasKanade(video)
+    lk.set_points(points)
+    lk.configure(verbose=0, show_pbar=False, processes=2, use_compiled_kernel=True)
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        displacements = lk.get_displacements(autosave=False)
+
+    assert set(lk.failed_points) == {len(POINTS)}
+    nan_rows = set(np.flatnonzero(np.isnan(displacements[:, :, 0]).any(axis=1)))
+    assert nan_rows == {len(POINTS)}
+    assert np.isfinite(displacements[:len(POINTS)]).all()
+
+
+def test_int_order_fallback_warns_only_once():
+    """The int_order fallback should not warn on every run."""
+    video = pyidi.VideoReader(input_file=DATA)
+    lk = pyidi.LucasKanade(video)
+    lk.set_points(POINTS)
+    lk.configure(verbose=0, show_pbar=False, use_compiled_kernel=True, int_order=1)
+
+    with pytest.warns(UserWarning, match='int_order'):
+        lk.get_displacements(autosave=False)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        lk.get_displacements(autosave=False)
+
+    assert not [w for w in caught if 'int_order' in str(w.message)]
+
+
+def test_numpy_fallback_helpers_match_the_compiled_ones():
+    """The numba-free helpers must agree with the compiled ones.
+
+    These are bound at import time depending on whether numba is installed, so
+    only one of them is ever exercised by the rest of the suite.
+    """
+    from pyidi.methods import _lucas_kanade as lk
+
+    rng = np.random.default_rng(0)
+    Gx = np.ascontiguousarray(rng.random((9, 9)) * 40 - 20)
+    Gy = np.ascontiguousarray(rng.random((9, 9)) * 40 - 20)
+    F = rng.random((9, 9)) * 255
+    G = rng.random((9, 9)) * 255
+
+    loops_inv, loops_ok = lk._inverse_loops(Gx, Gy)
+    vec_inv, vec_ok = lk._inverse_vectorised(Gx, Gy)
+    assert loops_ok == vec_ok is True
+    np.testing.assert_allclose(loops_inv, vec_inv, rtol=1e-12)
+
+    loops_delta, loops_err = lk._delta_loops(F, G, Gx, Gy, loops_inv)
+    vec_delta, vec_err = lk._delta_vectorised(F, G, Gx, Gy, vec_inv)
+    np.testing.assert_allclose(loops_delta, vec_delta, rtol=1e-12)
+    np.testing.assert_allclose(loops_err, vec_err, rtol=1e-12)
+
+    # a singular pair must be reported as singular by both
+    flat = np.zeros((9, 9))
+    assert lk._inverse_loops(flat, flat)[1] is False
+    assert lk._inverse_vectorised(flat, flat)[1] is False
+
+
+def test_analysis_runs_on_the_numpy_fallback_helpers(monkeypatch):
+    """A full analysis using the numba-free helpers matches the compiled result."""
+    from pyidi.methods import _lucas_kanade as lk
+
+    video = pyidi.VideoReader(input_file=DATA)
+    reference = _run(video, use_compiled_kernel=True)
+
+    monkeypatch.setattr(lk, '_compute_inverse', lk._inverse_vectorised)
+    monkeypatch.setattr(lk, 'compute_delta', lk._delta_vectorised)
+
+    fallback = _run(video, use_compiled_kernel=False)
+    np.testing.assert_allclose(fallback, reference, atol=1e-9, rtol=0)
+
+
+def test_missing_numba_falls_back_and_warns(monkeypatch):
+    """Without numba the compiled kernel is refused, with an explanation."""
+    from pyidi.methods import _lucas_kanade as lk
+
+    monkeypatch.setattr(lk, 'NUMBA_AVAILABLE', False)
+
+    video = pyidi.VideoReader(input_file=DATA)
+    method = pyidi.LucasKanade(video)
+    method.set_points(POINTS)
+    method.configure(verbose=0, show_pbar=False, use_compiled_kernel=True)
+
+    with pytest.warns(UserWarning, match='numba is not installed'):
+        assert method._compiled_kernel_available() is False
