@@ -322,7 +322,7 @@ class IDIMethod:
         # auto-save
         if autosave:
             self.create_analysis_directory()
-            self.save(root=self.root_this_analysis, save_directions=hasattr(self, 'dij'))
+            self.save(root=self.root_this_analysis)
 
         return self.displacements
     
@@ -352,7 +352,7 @@ class IDIMethod:
         os.mkdir(self.root_this_analysis)
 
     
-    def save(self, root='', save_directions = False):
+    def save(self, root=''):
         with open(os.path.join(root, 'results.pkl'), 'wb') as f:
             pickle.dump(self.displacements, f, protocol=-1)
         with open(os.path.join(root, 'points.pkl'), 'wb') as f:
@@ -360,10 +360,13 @@ class IDIMethod:
         if hasattr(self, 'warp_params'):
             with open(os.path.join(root, 'warp_params.pkl'), 'wb') as f:
                 pickle.dump(self.warp_params, f, protocol=-1)
-
-        if save_directions:
+        if hasattr(self, 'dij'):
             with open(os.path.join(root, 'directions.pkl'), 'wb') as f:
                 pickle.dump(self.dij, f, protocol=-1)
+        if hasattr(self, 'rbm_ij'):
+            with open(os.path.join(root, 'rbm_ij.pkl'), 'wb') as f:
+                pickle.dump(self.rbm_ij, f, protocol=-1)
+
         out = {
             'info': {
                 'width': self.video.image_width,
@@ -375,6 +378,7 @@ class IDIMethod:
             'settings': self.create_settings_dict(),
             'method': self.method_name()
         }
+
 
         with open(os.path.join(root, 'settings.json'), 'w') as f:
             json.dump(out, f, sort_keys=True, indent=4)

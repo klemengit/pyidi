@@ -247,14 +247,14 @@ class DirectionalLucasKanade(IDIMethod):
 
             # Iterate over points.
             for p, (point, dij) in enumerate(zip(self.points, self.dij)):
-                rbm_res_para = np.dot(rbm_res, dij) * dij
-                rbm_res_perp = rbm_res - rbm_res_para
+                # rbm_res_para = np.dot(rbm_res, dij) * dij
+                # rbm_res_perp = rbm_res - rbm_res_para
                 
                 # start optimization with previous optimal parameter values
                 d_init = np.round(self.displacements[p, ii-1, :]).astype(int)
                 d_res = self.displacements[p, ii-1, :] - d_init
 
-                yslice, xslice = self._padded_slice(point+d_init + rbm_int, self.roi_size, self.image_size, (1,1))
+                yslice, xslice = self._padded_slice(point + d_init + rbm_int, self.roi_size, self.image_size, (1,1))
                 G = self.video.get_frame(i)[yslice, xslice].astype(np.float64)
 
                 displacement = self.optimize_translations(
@@ -263,9 +263,9 @@ class DirectionalLucasKanade(IDIMethod):
                     maxiter=self.max_nfev,
                     tol=self.tol,
                     dij = dij,
-                    d_subpixel_init = -d_res + rbm_res
+                    d_subpixel_init = -d_res - rbm_res
                     )
-                self.displacements[p, ii, :] = displacement + d_init - rbm_res - rbm_res_perp
+                self.displacements[p, ii, :] = displacement + d_init - rbm_res
 
             # temp
             self.temp_disp[:, ii, :] = self.displacements[:, ii, :]
@@ -420,8 +420,8 @@ class DirectionalLucasKanade(IDIMethod):
             img_subset = f[yslice, xslice]
 
             spl = RectBivariateSpline(
-               x=np.arange(-pad[1], self.roi_size[0]+pad[1]),
-               y=np.arange(-pad[0], self.roi_size[1]+pad[0]),
+               x=np.arange(-pad[0], self.roi_size[0]+pad[0]),
+               y=np.arange(-pad[1], self.roi_size[1]+pad[1]),
                z=img_subset,
                kx=self.int_order,
                ky=self.int_order,
@@ -540,6 +540,7 @@ def multi(video: VideoReader, idi_method: DirectionalLucasKanade, processes, con
     points_split = tools.split_points(points, processes=processes)
     dij = idi_method.dij
     dij_split = tools.split_points(dij, processes=processes)
+    rbm_ij = idi_method.rbm_ij
 
 
     idi_kwargs = {
@@ -570,7 +571,7 @@ def multi(video: VideoReader, idi_method: DirectionalLucasKanade, processes, con
                 for n in range(0, len(points_split)):  # iterate over the jobs we need to run
                     # set visible false so we don't have a lot of bars all at once:
                     task_id = progress.add_task(f"task {n} ({len(points_split[n])} points)")
-                    futures.append(executor.submit(worker, points_split[n], dij_split[n], idi_kwargs, method_kwargs, n, _progress, task_id))
+                    futures.append(executor.submit(worker, points_split[n], dij_split[n], rbm_ij, idi_kwargs, method_kwargs, n, _progress, task_id))
 
                 # monitor the progress:
                 while sum([future.done() for future in futures]) < len(futures):
@@ -597,7 +598,7 @@ def multi(video: VideoReader, idi_method: DirectionalLucasKanade, processes, con
     return out1
 
 
-def worker(points, directions, idi_kwargs, method_kwargs, i, progress, task_id):
+def worker(points, directions, rbm_ij, idi_kwargs, method_kwargs, i, progress, task_id):
     """
     A function that is called when for each job in multiprocessing.
     """
@@ -609,6 +610,7 @@ def worker(points, directions, idi_kwargs, method_kwargs, i, progress, task_id):
     idi.configure_multiprocessing(i+1, progress, task_id) # configure the multiprocessing settings
     idi.set_points(points)
     idi.set_directions(directions)
+    idi.set_rigid_body_motion(rbm_ij)
     return idi.get_displacements(autosave=False), i
 
 

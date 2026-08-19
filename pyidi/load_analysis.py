@@ -62,6 +62,11 @@ def load_analysis(analysis_path, input_file=None, load_results=True):
         with open(os.path.join(analysis_path, 'directions.pkl'), 'rb') as f:
             dij = pickle.load(f)
         idi.set_directions(dij)
+    exists = os.path.exists(os.path.join(analysis_path, 'rbm_ij.pkl'))
+    if exists:
+        with open(os.path.join(analysis_path, 'rbm_ij.pkl'), 'rb') as f:
+            rbm_ij = pickle.load(f)
+        idi.set_rigid_body_motion(rbm_ij)
 
     return video, idi, settings['settings']
 
