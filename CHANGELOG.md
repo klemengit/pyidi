@@ -77,8 +77,14 @@ point tracked correctly.
 - Windows and macOS added to the CI test matrix.
 - When `processes` is greater than one, each worker is limited to a single numba
   thread, so process-level and thread-level parallelism cannot oversubscribe the
-  CPU. The kernel also requests a fork-safe numba threading layer, since the
-  OpenMP layer cannot survive `fork`. This applies to both Lucas-Kanade methods.
+  CPU. This applies to both Lucas-Kanade methods.
+- pyidi now asks numba for a fork-safe threading layer as the first thing it
+  does, before importing anything that imports numba. This matters because
+  pyMRAW starts numba's thread pool at import time, and the layer cannot be
+  changed once the pool is up. Left alone it resolves to whatever is installed:
+  TBB on machines that have it, but OpenMP on machines that do not, and GNU
+  OpenMP kills any child forked from a process that has used it. Set
+  `NUMBA_THREADING_LAYER` to override.
 - On Linux, the worker pool no longer forks when a GNU OpenMP runtime is loaded
   into the process, since libgomp terminates any child forked from a process
   that has used it. numba's own threading layer is fork-safe, but OpenCV and

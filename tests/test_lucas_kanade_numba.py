@@ -292,17 +292,24 @@ def test_threading_layer_is_fork_safe():
     kill its workers with BrokenProcessPool on platforms that fork (Linux, and
     macOS if the start method is changed back).
     """
-    if 'NUMBA_THREADING_LAYER' in os.environ:
+    if pyidi._THREADING_LAYER_FROM_ENV:
         pytest.skip('threading layer explicitly configured by the environment')
 
     import numba
     assert numba.config.THREADING_LAYER == 'forksafe'
 
-    # The configured value is only a request. Check what numba actually
-    # resolved to, which is what forking has to survive.
+    # The configured value is only a request, and it is only honoured while the
+    # thread pool is still down. Check what numba actually resolved to, which is
+    # what forking has to survive. Only GNU OpenMP is unsafe across fork, so
+    # this only constrains platforms that fork; numba deliberately allows the
+    # OpenMP layer under ``forksafe`` everywhere else.
+    import multiprocessing
+    if multiprocessing.get_start_method() != 'fork':
+        return
+
     _run(pyidi.VideoReader(input_file=DATA), True)
     from numba.np.ufunc import parallel as nb_parallel
-    assert nb_parallel.threading_layer() in ('tbb', 'workqueue')
+    assert nb_parallel.threading_layer() != 'omp'
 
 
 def test_fork_after_threaded_run_does_not_break_workers():

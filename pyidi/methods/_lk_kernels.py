@@ -47,11 +47,12 @@ if NUMBA_AVAILABLE:
     njit = nb.njit
     prange = nb.prange
 
-    # numba's OpenMP threading layer is not safe across ``fork``. If the thread
-    # pool has been started in the parent process (by any single-process
-    # analysis) and the user then runs with ``processes=N``, the forked workers
-    # die with BrokenProcessPool. Ask numba for a layer that is safe under fork,
-    # unless the user has explicitly chosen one through the environment.
+    # numba's OpenMP threading layer is not safe across ``fork``: the forked
+    # workers die with BrokenProcessPool. ``pyidi/__init__.py`` normally asks for
+    # a fork-safe layer through the environment before anything imports numba,
+    # which is the only way to get in before pyMRAW launches the thread pool.
+    # This is the backstop for when numba was imported before pyidi, and only
+    # has an effect while the pool is still down.
     if 'NUMBA_THREADING_LAYER' not in os.environ:
         nb.config.THREADING_LAYER = 'forksafe'
 else:                                    # pragma: no cover - environment dependent
