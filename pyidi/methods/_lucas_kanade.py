@@ -23,6 +23,7 @@ from .. import tools
 from ..video_reader import VideoReader
 
 from .idi_method import IDIMethod
+from . import _lk_kernels
 from ..progress_bar import progress_bar, rich_progress_bar_setup
 try:
     from qtpy.QtWidgets import QApplication
@@ -36,9 +37,10 @@ class LucasKanade(IDIMethod):
     criterium.
     """  
     def configure(
-        self, roi_size=(9, 9), pad=2, max_nfev=20, 
-        tol=1e-8, int_order=3, verbose=1, show_pbar=True, 
-        processes=1, resume_analysis=False, reference_image=0, frame_range='full'
+        self, roi_size=(9, 9), pad=2, max_nfev=20,
+        tol=1e-8, int_order=3, verbose=1, show_pbar=True,
+        processes=1, resume_analysis=False, reference_image=0, frame_range='full',
+        use_compiled_kernel=True
     ):
         """
         Displacement identification based on Lucas-Kanade method,
@@ -72,6 +74,11 @@ class LucasKanade(IDIMethod):
         :param frame_range: Part of the video to process. If "full", a full video is processed. If first element of tuple is not 0,
             a appropriate reference image should be chosen.
         :type frame_range: tuple or "full"
+        :param use_compiled_kernel: use the compiled (numba) kernel, which fuses the inner
+            optimization loop and parallelizes over points. Results are identical
+            to the pure NumPy path to within floating-point round-off. Falls back
+            to the NumPy path automatically if ``int_order != 3``. Defaults to True.
+        :type use_compiled_kernel: bool, optional
         """
         # The arguments are mapped to the class attributes
         # The class attributes are only overwritten if the argument is not None.
@@ -101,7 +108,9 @@ class LucasKanade(IDIMethod):
             self.reference_image = reference_image
         if frame_range is not None:
             self.frame_range = frame_range
-        
+        if use_compiled_kernel is not None:
+            self.use_compiled_kernel = use_compiled_kernel
+
         # After the attributes are set, other computation can be carried out.
         self._set_frame_range()
 
@@ -189,7 +198,11 @@ class LucasKanade(IDIMethod):
             print('Interpolating the reference image...')
 
         self._interpolate_reference(video)
-        
+
+        use_compiled_kernel = self._compiled_kernel_available()
+        if use_compiled_kernel:
+            self._prepare_numba_reference()
+
         if self.verbose:
             print(f'...done in {time.time() - t:.2f} s')
 
@@ -200,30 +213,19 @@ class LucasKanade(IDIMethod):
             # if resuming analysis and completed points are available, skip those points
             if self.resume_analysis and hasattr(self, "completed_points") and self.completed_points > ii:
                 continue
-            
+
             ii = ii + 1
 
-            # Iterate over points.
-            for p, point in enumerate(self.points):
-                
-                # start optimization with previous optimal parameter values
-                d_init = np.round(self.displacements[p, ii-1, :]).astype(int)
-                d_res  = self.displacements[p, ii-1, :] - d_init
+            # Read the frame once per time step. Reading it inside the loop over
+            # points re-decodes the same frame for every point, which is free for
+            # memory-mapped formats but costs a full decode per point for video
+            # and image files.
+            frame = np.asarray(video.get_frame(i))
 
-                yslice, xslice = self._padded_slice(point+d_init, self.roi_size, self.image_size, 1)
-                G = video.get_frame(i)[yslice, xslice]
-
-                displacements = self.optimize_translations(
-                    G=G,
-                    F_spline=self.interpolation_splines[p],
-                    maxiter=self.max_nfev,
-                    tol=self.tol,
-                    d_subpixel_init=-d_res,
-                    point_index=p,
-                    frame=i
-                )
-
-                self.displacements[p, ii, :] = displacements + d_init
+            if use_compiled_kernel:
+                self._optimize_frame_numba(frame, ii, i)
+            else:
+                self._optimize_frame_numpy(frame, ii, i)
 
             # temp
             self.temp_disp[:, ii, :] = self.displacements[:, ii, :]
@@ -251,6 +253,134 @@ class LucasKanade(IDIMethod):
         if self.process_number == 0:
             self.clear_temp_files()
 
+
+    def _compiled_kernel_available(self):
+        """Decide whether the compiled kernel can be used for this configuration.
+
+        :return: True if the fused numba kernel should be used.
+        :rtype: bool
+        """
+        if not getattr(self, 'use_compiled_kernel', True):
+            return False
+
+        # The kernel implements cubic (de Boor) spline evaluation only.
+        if self.int_order != 3:
+            warnings.warn(
+                f'The compiled kernel supports int_order=3 only (got {self.int_order}). '
+                'Falling back to the NumPy implementation.'
+            )
+            return False
+
+        return True
+
+    def _prepare_numba_reference(self):
+        """Convert the reference splines into flat arrays for the compiled kernel.
+
+        Every region of interest has the same shape, so all points share the same
+        knot vectors and only the spline coefficients differ.
+        """
+        splines = self.interpolation_splines
+        tx, ty, _ = splines[0].tck
+
+        self._nb_tx = np.ascontiguousarray(tx, dtype=np.float64)
+        self._nb_ty = np.ascontiguousarray(ty, dtype=np.float64)
+
+        n_cy = len(tx) - self.int_order - 1
+        n_cx = len(ty) - self.int_order - 1
+
+        self._nb_coeffs = np.empty((len(splines), n_cy, n_cx), dtype=np.float64)
+        for p, spline in enumerate(splines):
+            self._nb_coeffs[p] = spline.tck[2].reshape(n_cy, n_cx)
+
+        self._nb_points = np.ascontiguousarray(self.points, dtype=np.int64)
+        self._nb_out = np.empty((len(splines), 2), dtype=np.float64)
+        self._nb_status = np.empty(len(splines), dtype=np.int64)
+        self._nb_clamped = np.empty(len(splines), dtype=np.bool_)
+        self._edge_warning_issued = False
+
+    def _optimize_frame_numpy(self, frame, ii, i):
+        """Run the reference NumPy optimization for all points of a single frame.
+
+        :param frame: the current frame
+        :type frame: ndarray
+        :param ii: index into the displacement array
+        :type ii: int
+        :param i: frame number in the video (for error messages)
+        :type i: int
+        """
+        # Iterate over points.
+        for p, point in enumerate(self.points):
+
+            # start optimization with previous optimal parameter values
+            d_init = np.round(self.displacements[p, ii-1, :]).astype(int)
+            d_res = self.displacements[p, ii-1, :] - d_init
+
+            yslice, xslice = self._padded_slice(point+d_init, self.roi_size, self.image_size, 1)
+            G = frame[yslice, xslice]
+
+            displacements = self.optimize_translations(
+                G=G,
+                F_spline=self.interpolation_splines[p],
+                maxiter=self.max_nfev,
+                tol=self.tol,
+                d_subpixel_init=-d_res,
+                point_index=p,
+                frame=i
+            )
+
+            self.displacements[p, ii, :] = displacements + d_init
+
+    def _optimize_frame_numba(self, frame, ii, i):
+        """Run the compiled kernel for all points of a single frame.
+
+        :param frame: the current frame
+        :type frame: ndarray
+        :param ii: index into the displacement array
+        :type ii: int
+        :param i: frame number in the video (for error messages)
+        :type i: int
+        """
+        _lk_kernels.optimize_frame(
+            frame,
+            self._nb_points,
+            self._nb_tx,
+            self._nb_ty,
+            self._nb_coeffs,
+            self.displacements[:, ii-1, :],
+            self._nb_out,
+            self._nb_status,
+            self._nb_clamped,
+            int(self.roi_size[0]),
+            int(self.roi_size[1]),
+            1,
+            self.max_nfev,
+            self.tol,
+        )
+
+        if self._nb_status.any():
+            p = int(np.argmax(self._nb_status != _lk_kernels.STATUS_OK))
+            if self._nb_status[p] == _lk_kernels.STATUS_SINGULAR:
+                raise ValueError(
+                    f"Degenerate ROI at point index {p} (position {self.points[p]}), frame {i}. "
+                    f"The gradient matrix is singular (flat region or single-direction gradient). "
+                    f"Reposition this point away from uniform or edge-only regions."
+                )
+            raise ValueError(
+                f"Diverged at point index {p} (position {self.points[p]}), frame {i}. "
+                f"The optimization ran away to a non-finite displacement, which usually "
+                f"means the ROI is poorly conditioned (for example a single straight edge, "
+                f"giving no gradient across the edge direction). "
+                f"Reposition this point onto a feature with gradient in both directions, "
+                f"or increase roi_size."
+            )
+
+        if not self._edge_warning_issued and self._nb_clamped.any():
+            warnings.warn('Reached image edge. The displacement optimization ' +
+                'algorithm may not converge, or selected points might be too close ' +
+                'to image border. Please check analysis settings.')
+            self._edge_warning_issued = True
+
+        self.displacements[:, ii, :] = self._nb_out
 
     def optimize_translations(self, G, F_spline, maxiter, tol, d_subpixel_init=(0, 0),
                               point_index=None, frame=None):
@@ -448,6 +578,8 @@ def multi(video: VideoReader, idi_method: LucasKanade, processes, configuration_
     from concurrent.futures import ProcessPoolExecutor
     import multiprocessing
 
+    _warn_if_fork_unsafe()
+
     if processes < 0:
         processes = cpu_count() + processes
     elif processes == 0:
@@ -511,12 +643,44 @@ def multi(video: VideoReader, idi_method: LucasKanade, processes, configuration_
     return out1
 
 
+def _warn_if_fork_unsafe():
+    """Warn if numba's threading layer cannot survive ``fork``.
+
+    Only reachable when the user has explicitly selected a threading layer
+    through ``NUMBA_THREADING_LAYER``; otherwise ``_lk_kernels`` asks numba for a
+    fork-safe layer at import time.
+    """
+    import multiprocessing
+
+    if multiprocessing.get_start_method() != 'fork':
+        return
+
+    try:
+        from numba.np.ufunc import parallel as nb_parallel
+        layer = nb_parallel.threading_layer()
+    except Exception:
+        # The thread pool has not been started, so there is nothing to inherit.
+        return
+
+    if layer == 'omp':
+        warnings.warn(
+            "numba's OpenMP threading layer is active and is not safe across fork. "
+            "The worker processes may die with BrokenProcessPool. Unset "
+            "NUMBA_THREADING_LAYER, or set it to 'tbb' or 'workqueue', to avoid this."
+        )
+
+
 def worker(points, idi_kwargs, method_kwargs, i, progress, task_id):
     """
     A function that is called when for each job in multiprocessing.
     """
     method_kwargs['show_pbar'] = False # use the rich progress bar insted of tqdm
-    
+
+    # Each worker gets a single numba thread. Without this, every process would
+    # start a full thread pool of its own and the processes would oversubscribe
+    # the CPU, which is slower than either form of parallelism on its own.
+    nb.set_num_threads(1)
+
     video = VideoReader(**idi_kwargs)
     idi = LucasKanade(video)
     idi.configure(**method_kwargs)
@@ -525,7 +689,44 @@ def worker(points, idi_kwargs, method_kwargs, i, progress, task_id):
     return idi.get_displacements(autosave=False), i
 
 
-# @nb.njit
+@nb.njit(cache=True)
+def _compute_inverse(Gx, Gy, tol=1e-10):
+    """
+    Compute the inverse of the gradient matrix for Lucas-Kanade optimization.
+
+    Compiled counterpart of :func:`compute_inverse_numba`. The singular case is
+    reported through a boolean flag rather than ``None``, because numba cannot
+    type a function that returns either an array or ``None``.
+
+    :param Gx: x-gradient of the image subset
+    :param Gy: y-gradient of the image subset
+    :param tol: tolerance for detecting singular matrix
+    :return: ``(A_inv, ok)``; ``ok`` is False if the matrix is near-singular
+    """
+    Gx2 = 0.0
+    Gy2 = 0.0
+    GxGy = 0.0
+    for i in range(Gx.shape[0]):
+        for j in range(Gx.shape[1]):
+            gx = Gx[i, j]
+            gy = Gy[i, j]
+            Gx2 += gx * gx
+            Gy2 += gy * gy
+            GxGy += gx * gy
+
+    det = GxGy**2 - Gx2*Gy2
+    A_inv = np.empty((2, 2), dtype=np.float64)
+    if abs(det) < tol:
+        return A_inv, False  # Near-singular matrix
+
+    A_inv[0, 0] = GxGy / det
+    A_inv[0, 1] = -Gx2 / det
+    A_inv[1, 0] = -Gy2 / det
+    A_inv[1, 1] = GxGy / det
+
+    return A_inv, True
+
+
 def compute_inverse_numba(Gx, Gy, tol=1e-10):
     """
     Compute the inverse of the gradient matrix for Lucas-Kanade optimization.
@@ -535,24 +736,27 @@ def compute_inverse_numba(Gx, Gy, tol=1e-10):
     :param tol: tolerance for detecting singular matrix
     :return: inverse matrix, or None if the matrix is near-singular
     """
-    Gx2 = np.sum(Gx**2)
-    Gy2 = np.sum(Gy**2)
-    GxGy = np.sum(Gx * Gy)
-
-    det = GxGy**2 - Gx2*Gy2
-    if abs(det) < tol:
-        return None  # Near-singular matrix
-
-    A_inv = 1/det * np.array([[GxGy, -Gx2], [-Gy2, GxGy]])
-
+    A_inv, ok = _compute_inverse(np.ascontiguousarray(Gx, dtype=np.float64),
+                                 np.ascontiguousarray(Gy, dtype=np.float64), tol)
+    if not ok:
+        return None
     return A_inv
 
-# @nb.njit
-def compute_delta_numba(F, G, Gx, Gy, A_inv):
-    F_G = G - F
-    b = np.array([np.sum(Gx*F_G), np.sum(Gy*F_G)])
-    delta = np.dot(A_inv, b)
 
-    error = np.sqrt(np.sum(delta**2))
+@nb.njit(cache=True)
+def compute_delta_numba(F, G, Gx, Gy, A_inv):
+    b0 = 0.0
+    b1 = 0.0
+    for i in range(F.shape[0]):
+        for j in range(F.shape[1]):
+            F_G = G[i, j] - F[i, j]
+            b0 += Gx[i, j] * F_G
+            b1 += Gy[i, j] * F_G
+
+    delta = np.empty(2, dtype=np.float64)
+    delta[0] = A_inv[0, 0] * b0 + A_inv[0, 1] * b1
+    delta[1] = A_inv[1, 0] * b0 + A_inv[1, 1] * b1
+
+    error = np.sqrt(delta[0]**2 + delta[1]**2)
     return delta, error
 
