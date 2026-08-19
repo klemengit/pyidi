@@ -830,31 +830,9 @@ def _warm_up_kernels(video: VideoReader, method_kwargs: dict):
         pass
 
 
-def _warn_if_fork_unsafe():
-    """Warn if numba's threading layer cannot survive ``fork``.
-
-    Only reachable when the user has explicitly selected a threading layer
-    through ``NUMBA_THREADING_LAYER``; otherwise ``_lk_kernels`` asks numba for a
-    fork-safe layer at import time.
-    """
-    import multiprocessing
-
-    if multiprocessing.get_start_method() != 'fork':
-        return
-
-    try:
-        from numba.np.ufunc import parallel as nb_parallel
-        layer = nb_parallel.threading_layer()
-    except Exception:
-        # The thread pool has not been started, so there is nothing to inherit.
-        return
-
-    if layer == 'omp':
-        warnings.warn(
-            "numba's OpenMP threading layer is active and is not safe across fork. "
-            "The worker processes may die with BrokenProcessPool. Unset "
-            "NUMBA_THREADING_LAYER, or set it to 'tbb' or 'workqueue', to avoid this."
-        )
+# Shared with DirectionalLucasKanade; kept under the original name here because
+# it has been importable from this module since 1.4.0.
+_warn_if_fork_unsafe = _lk_kernels.warn_if_fork_unsafe
 
 
 def worker(points, idi_kwargs, method_kwargs, i, progress, task_id):
