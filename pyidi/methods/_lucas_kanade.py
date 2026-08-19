@@ -601,6 +601,9 @@ def multi(video: VideoReader, idi_method: LucasKanade, processes, configuration_
     exclude_keys = ["processes"]
     method_kwargs = dict([(k, idi_method.__dict__.get(k, None)) for k in configuration_keys if k not in exclude_keys])
 
+    # Compile once here rather than once per worker.
+    _warm_up_kernels(video, method_kwargs)
+
     print(f'Computation start: {datetime.datetime.now()}')
 
     t_start = time.time()
@@ -641,6 +644,87 @@ def multi(video: VideoReader, idi_method: LucasKanade, processes, configuration_
     print(f'Computation duration: {hours:0>2.0f}:{minutes:0>2.0f}:{seconds:.2f}')
     
     return out1
+
+
+def _warm_up_kernels(video: VideoReader, method_kwargs: dict):
+    """Compile the numba kernels once, in the parent process, before forking.
+
+    Without this every worker compiles the same kernel independently on a cold
+    cache. Measured at 5-6 s for an analysis that runs in well under a second
+    once compiled. It also avoids several processes writing the same cache entry
+    at the same time, which is a long-standing open numba bug (numba issue
+    #4807, "Cache causes Segmentation Faults when generated in parallel").
+
+    Where the start method is ``fork`` the workers inherit the compiled code
+    directly; where it is ``spawn`` they load it from the on-disk cache the
+    parent has just written. Either way it is compiled once instead of N times.
+
+    This is only an optimization: if anything here fails the workers simply
+    compile the kernels themselves, so all errors are swallowed.
+
+    :param video: the video, used to match the frame dtype the workers will see
+    :type video: VideoReader
+    :param method_kwargs: the configuration passed on to the workers
+    :type method_kwargs: dict
+    """
+    try:
+        roi_size = np.array(method_kwargs.get('roi_size', (9, 9)), dtype=int)
+        pad = int(method_kwargs.get('pad', 2))
+        int_order = int(method_kwargs.get('int_order', 3))
+        tol = float(method_kwargs.get('tol', 1e-8))
+        use_compiled_kernel = method_kwargs.get('use_compiled_kernel', True)
+
+        # The compiled code is specialized on the dtype of the frames, so warm
+        # it with a real frame rather than a synthetic one.
+        frame = np.asarray(video.get_frame(0))
+
+        if not use_compiled_kernel or int_order != 3:
+            # The NumPy path still goes through compiled helpers. Mirror the
+            # array layouts of the real call so the same specialization is hit.
+            subset = frame[:roi_size[0] + 2, :roi_size[1] + 2].astype(np.float64)
+            Gx, Gy = tools.get_gradient(subset)
+            compute_inverse_numba(Gx, Gy)
+            compute_delta_numba(np.zeros(Gx.shape), subset[1:-1, 1:-1], Gx, Gy, np.eye(2))
+            return
+
+        grid_y = np.arange(-pad, roi_size[0] + pad)
+        grid_x = np.arange(-pad, roi_size[1] + pad)
+        spline = RectBivariateSpline(
+            x=grid_y, y=grid_x, z=np.zeros((len(grid_y), len(grid_x))),
+            kx=int_order, ky=int_order, s=0
+        )
+        tx, ty, coeffs = spline.tck
+        n_cy = len(tx) - int_order - 1
+        n_cx = len(ty) - int_order - 1
+
+        centre = [frame.shape[0] // 2, frame.shape[1] // 2]
+        # Two points, not one: in the real loop ``previous`` is a slice of the 3D
+        # displacement array and is therefore non-contiguous, but with a single
+        # point that slice is still contiguous and numba would compile a
+        # different, unused specialization.
+        points = np.array([centre, centre], dtype=np.int64)
+        previous = np.zeros((2, 2, 2))
+
+        _lk_kernels.optimize_frame(
+            frame,
+            points,
+            np.ascontiguousarray(tx, dtype=np.float64),
+            np.ascontiguousarray(ty, dtype=np.float64),
+            np.ascontiguousarray(np.repeat(coeffs.reshape(1, n_cy, n_cx), 2, axis=0),
+                                 dtype=np.float64),
+            previous[:, 0, :],
+            np.zeros((2, 2)),
+            np.zeros(2, dtype=np.int64),
+            np.zeros(2, dtype=np.bool_),
+            int(roi_size[0]),
+            int(roi_size[1]),
+            1,
+            1,
+            tol,
+        )
+    except Exception:
+        # Warming the cache is an optimization, never a requirement.
+        pass
 
 
 def _warn_if_fork_unsafe():

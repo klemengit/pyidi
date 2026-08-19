@@ -230,3 +230,26 @@ def test_fork_after_threaded_run_does_not_break_workers():
         forked = lk.get_displacements(autosave=False)
 
     np.testing.assert_allclose(forked, single, atol=1e-9, rtol=0)
+
+
+def test_warm_up_matches_the_real_call_signature():
+    """The pre-fork warm-up must compile the signature the real loop uses.
+
+    numba specializes on dtype *and memory layout*. If the warm-up call differs
+    in either, it compiles a specialization nothing else uses and every worker
+    still compiles the kernel itself, making the warm-up pointless. This pins
+    the two together.
+    """
+    from pyidi.methods._lucas_kanade import _warm_up_kernels
+
+    video = pyidi.VideoReader(input_file=DATA)
+
+    _warm_up_kernels(video, {'roi_size': np.array([9, 9]), 'pad': 2,
+                             'int_order': 3, 'tol': 1e-8, 'use_compiled_kernel': True})
+    warmed = set(_lk_kernels.optimize_frame.signatures)
+    assert warmed, 'the warm-up did not compile anything'
+
+    _run(video, use_compiled_kernel=True)
+
+    new = set(_lk_kernels.optimize_frame.signatures) - warmed
+    assert not new, f'the real call compiled a signature the warm-up missed: {new}'
