@@ -133,3 +133,9 @@ data/data_*_pyidi_analysis/analysis_*/
 examples/evm_tmp_root/
 examples/evm_*.mp4
 examples/evm_*.gif
+
+# Claude Code instructions (local only)
+CLAUDE.md
+
+# uv lockfile (project is pip/setuptools based)
+uv.lock
