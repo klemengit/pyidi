@@ -1,17 +1,117 @@
 import sys
 import numpy as np
-from PyQt6 import QtWidgets, QtCore
+from PyQt6 import QtWidgets, QtCore, QtGui
 from pyqtgraph import GraphicsLayoutWidget, ImageItem, ScatterPlotItem
 import pyqtgraph as pg
 # import pyidi  # Assuming pyidi is a custom module for video handling
 
 from ..selection_geometry import points_along_polygon, rois_inside_polygon, rois_inside_mask
 
+#: Grab radius (in screen pixels) within which a click/drag is considered to hit an
+#: existing grid/polyline vertex. Kept constant in screen space so hit-testing feels
+#: the same regardless of the current zoom level.
+VERTEX_GRAB_RADIUS_PX = 10
+
+
 class BrushViewBox(pg.ViewBox):
     def __init__(self, parent_gui, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.setMouseMode(self.PanMode)
         self.parent_gui = parent_gui
+        self._dragging_vertex = None  # set while a vertex drag is in progress
+
+    def _vertex_drag_container(self):
+        """Return the (entries, kind) vertex-list container for the active selection method.
+
+        Only the "Grid" and "Along the line" methods support vertex dragging.
+
+        :return: the list of grid/polygon dicts and a kind tag ("grid" or "polygon"),
+            or (None, None) if the current mode/method does not support vertex dragging.
+        :rtype: tuple
+        """
+        gui = self.parent_gui
+        if gui.mode != "selection":
+            return None, None
+        if gui.method_buttons["Grid"].isChecked():
+            return gui.grid_polygons, "grid"
+        if gui.method_buttons["Along the line"].isChecked():
+            return gui.drawing_polygons, "polygon"
+        return None, None
+
+    def _start_vertex_drag(self, ev):
+        """Hit-test the drag start position against existing vertices; begin a drag if one is hit.
+
+        :param ev: the pyqtgraph mouse-drag event, with ``ev.isStart()`` True
+        :return: True if a vertex was grabbed and the event was accepted
+        :rtype: bool
+        """
+        entries, kind = self._vertex_drag_container()
+        if entries is None:
+            return False
+        pos = ev.buttonDownScenePos()
+        if not self.sceneBoundingRect().contains(pos):
+            return False
+        point = self.parent_gui.view.mapSceneToView(pos)
+        entry_idx, vertex_idx = self.parent_gui.find_vertex_to_drag(entries, point.x(), point.y())
+        if entry_idx is None:
+            return False
+        entry = entries[entry_idx]
+        self._dragging_vertex = {
+            'kind': kind,
+            'entry': entry,
+            'vertex_index': vertex_idx,
+            'original_position': entry['points'][vertex_idx],
+        }
+        ev.accept()
+        return True
+
+    def _continue_vertex_drag(self, ev):
+        """Move the grabbed vertex for a mid-drag or finishing event; commit undo/recompute on finish.
+
+        :param ev: the pyqtgraph mouse-drag event, with ``ev.isStart()`` False
+        :return: True if a vertex drag was in progress and the event was consumed
+        :rtype: bool
+        """
+        drag = self._dragging_vertex
+        if drag is None:
+            return False
+
+        pos = ev.scenePos()
+        if self.sceneBoundingRect().contains(pos):
+            point = self.parent_gui.view.mapSceneToView(pos)
+            drag['entry']['points'][drag['vertex_index']] = (point.x(), point.y())
+            if drag['kind'] == 'grid':
+                self.parent_gui.update_grid_display()
+            else:
+                self.parent_gui.update_polygon_display()
+
+        if ev.isFinish():
+            self.parent_gui.push_undo({
+                'type': 'move',
+                'kind': drag['kind'],
+                'entry': drag['entry'],
+                'vertex_index': drag['vertex_index'],
+                'original_position': drag['original_position'],
+            })
+            self.parent_gui.recompute_roi_points()
+            self._dragging_vertex = None
+
+        ev.accept()
+        return True
+
+    def _handle_vertex_drag(self, ev):
+        """Handle a plain left-drag that starts on an existing grid/polyline vertex.
+
+        A drag starting near a vertex moves that vertex; a drag starting elsewhere is left
+        untouched so the caller falls back to panning the view.
+
+        :param ev: the pyqtgraph mouse-drag event
+        :return: True if the event was consumed as a vertex drag
+        :rtype: bool
+        """
+        if ev.isStart():
+            return self._start_vertex_drag(ev)
+        return self._continue_vertex_drag(ev)
 
     def mouseClickEvent(self, ev):
         if self.parent_gui.mode == "selection" and self.parent_gui.method_buttons["Brush"].isChecked():
@@ -23,63 +123,82 @@ class BrushViewBox(pg.ViewBox):
         else:
             super().mouseClickEvent(ev)
 
+    def _handle_gradient_direction_drag(self, ev):
+        """Handle direction-line drag when Filter mode is setting the gradient direction.
+
+        :param ev: the pyqtgraph mouse-drag event
+        :return: True if the event was consumed
+        :rtype: bool
+        """
+        if not (self.parent_gui.mode == "filter" and self.parent_gui.setting_direction):
+            return False
+
+        pos = ev.scenePos()
+        if not self.sceneBoundingRect().contains(pos):
+            return False
+        point = self.mapSceneToView(pos)
+
+        if ev.isStart():
+            self.parent_gui.gradient_direction_points = [(point.x(), point.y())]
+            self.parent_gui.gradient_direction_start = (point.x(), point.y())
+        elif ev.isFinish():
+            if hasattr(self.parent_gui, 'gradient_direction_start'):
+                self.parent_gui.gradient_direction_points = [
+                    self.parent_gui.gradient_direction_start,
+                    (point.x(), point.y())
+                ]
+                self.parent_gui.compute_direction_vector()
+                self.parent_gui.update_direction_line()
+                # Toggle off the direction selection mode
+                self.parent_gui.direction_button.setChecked(False)
+                self.parent_gui.set_gradient_direction_mode()
+                self.parent_gui.compute_candidate_points_gradient_direction()
+        else:
+            # During drag, update the line display
+            if hasattr(self.parent_gui, 'gradient_direction_start'):
+                temp_points = [
+                    self.parent_gui.gradient_direction_start,
+                    (point.x(), point.y())
+                ]
+                xs = [p[0] for p in temp_points]
+                ys = [p[1] for p in temp_points]
+                self.parent_gui.direction_line.setData(xs, ys)
+
+        ev.accept()
+        return True
+
+    def _handle_brush_drag(self, ev):
+        """Handle Ctrl+drag brush painting in Selection mode when Brush is the active method.
+
+        :param ev: the pyqtgraph mouse-drag event
+        :return: True if the event was consumed
+        :rtype: bool
+        """
+        if not (self.parent_gui.mode == "selection" and self.parent_gui.method_buttons["Brush"].isChecked()):
+            return False
+        if not self.parent_gui.ctrl_held:
+            return False
+
+        ev.accept()
+        if ev.isStart():
+            self.parent_gui._painting = True
+            self.parent_gui._brush_path = []
+            self.parent_gui.handle_brush_start(ev)
+        elif ev.isFinish():
+            self.parent_gui._painting = False
+            self.parent_gui.handle_brush_end(ev)
+        else:
+            self.parent_gui.handle_brush_move(ev)
+        return True
+
     def mouseDragEvent(self, ev, axis=None):
-        # Handle gradient direction selection
-        if self.parent_gui.mode == "filter" and self.parent_gui.setting_direction:
-            if ev.isStart():
-                pos = ev.scenePos()
-                if self.sceneBoundingRect().contains(pos):
-                    point = self.mapSceneToView(pos)
-                    self.parent_gui.gradient_direction_points = [(point.x(), point.y())]
-                    self.parent_gui.gradient_direction_start = (point.x(), point.y())
-                    ev.accept()
-                    return
-            elif ev.isFinish():
-                pos = ev.scenePos()
-                if self.sceneBoundingRect().contains(pos):
-                    point = self.mapSceneToView(pos)
-                    if hasattr(self.parent_gui, 'gradient_direction_start'):
-                        self.parent_gui.gradient_direction_points = [
-                            self.parent_gui.gradient_direction_start,
-                            (point.x(), point.y())
-                        ]
-                        self.parent_gui.compute_direction_vector()
-                        self.parent_gui.update_direction_line()
-                        # Toggle off the direction selection mode
-                        self.parent_gui.direction_button.setChecked(False)
-                        self.parent_gui.set_gradient_direction_mode()
-                        self.parent_gui.compute_candidate_points_gradient_direction()
-                    ev.accept()
-                    return
-            else:
-                # During drag, update the line display
-                pos = ev.scenePos()
-                if self.sceneBoundingRect().contains(pos):
-                    point = self.mapSceneToView(pos)
-                    if hasattr(self.parent_gui, 'gradient_direction_start'):
-                        temp_points = [
-                            self.parent_gui.gradient_direction_start,
-                            (point.x(), point.y())
-                        ]
-                        xs = [p[0] for p in temp_points]
-                        ys = [p[1] for p in temp_points]
-                        self.parent_gui.direction_line.setData(xs, ys)
-                    ev.accept()
-                    return
-        
-        if self.parent_gui.mode == "selection" and self.parent_gui.method_buttons["Brush"].isChecked():
-            if self.parent_gui.ctrl_held:
-                ev.accept()
-                if ev.isStart():
-                    self.parent_gui._painting = True
-                    self.parent_gui._brush_path = []
-                    self.parent_gui.handle_brush_start(ev)
-                elif ev.isFinish():
-                    self.parent_gui._painting = False
-                    self.parent_gui.handle_brush_end(ev)
-                else:
-                    self.parent_gui.handle_brush_move(ev)
-                return
+        if self._handle_gradient_direction_drag(ev):
+            return
+        if self._handle_brush_drag(ev):
+            return
+        # Plain left-drag starting on an existing grid/polyline vertex moves that vertex.
+        if self._handle_vertex_drag(ev):
+            return
         # fallback: pan
         super().mouseDragEvent(ev, axis)
 
@@ -122,6 +241,13 @@ class SelectionGUI(QtWidgets.QMainWindow):
         self.ctrl_held = False
         self.brush_deselect_mode = False
         self.installEventFilter(self)
+
+        # Bounded undo stack: covers adding a vertex, moving a vertex, and deleting a
+        # grid/polyline. Manual points, brush strokes and filter results are not undoable.
+        self.undo_stack = []
+        self.undo_stack_limit = 50
+        self.undo_shortcut = QtGui.QShortcut(QtGui.QKeySequence.StandardKey.Undo, self)
+        self.undo_shortcut.activated.connect(self.undo)
 
         self.gradient_direction_points = []
         self.gradient_direction = None
@@ -689,6 +815,7 @@ class SelectionGUI(QtWidgets.QMainWindow):
         show_spacing = is_along or is_grid or is_brush
 
         self.start_new_line_button.setVisible(is_along or is_grid)
+        self.start_new_line_button.setText("Start new grid" if is_grid else "Start new line")
         self.polygon_list.setVisible(is_along)
         self.delete_polygon_button.setVisible(is_along)
         self.grid_list.setVisible(is_grid)
@@ -705,9 +832,15 @@ class SelectionGUI(QtWidgets.QMainWindow):
         if is_brush:
             self.show_instruction("Hold Ctrl and drag to paint selection area. Use distance slider to control subset spacing.")
         elif is_along:
-            self.show_instruction("Click to add points along the line. Click 'Start new line' to begin a new one.")
+            self.show_instruction(
+                "Click to add points along the line. Drag an existing point to move it. "
+                "Click 'Start new line' to begin a new one. Ctrl+Z to undo."
+            )
         elif is_grid:
-            self.show_instruction("Click to define grid corners. Click 'Start new line' to begin a new grid.")
+            self.show_instruction(
+                "Click to define grid corners. Drag an existing corner to move it. "
+                "Click 'Start new grid' to begin a new grid. Ctrl+Z to undo."
+            )
         elif method_name == "Manual":
             self.show_instruction("Click to add points manually.")
         elif method_name == "Remove point":
@@ -906,6 +1039,10 @@ class SelectionGUI(QtWidgets.QMainWindow):
     def clear_selection(self):
         # print("Clearing selections...")
 
+        # Any pending undo actions reference the entries/rows being wiped out below,
+        # so they would no longer apply consistently after a full clear.
+        self.undo_stack = []
+
         # Clear manual points
         self.manual_points = []
 
@@ -978,6 +1115,157 @@ class SelectionGUI(QtWidgets.QMainWindow):
         """Get all selected points from manual, polygons and grid."""
         return np.array(self.selected_points)[:, ::-1] if self.selected_points else []
 
+    # Vertex hit-testing (shared by Grid and "Along the line" click/drag handling)
+    def nearest_vertex(self, points, x, y):
+        """Find the vertex nearest to (x, y) in a list of (x, y) points.
+
+        Distance is measured in screen pixels (via the view's current pixel size) so
+        that hit-testing behaves consistently regardless of the current zoom level.
+
+        :param points: candidate vertices in view/data coordinates, native (x, y) order
+        :type points: list[tuple[float, float]]
+        :param x: query x coordinate in view/data units
+        :type x: float
+        :param y: query y coordinate in view/data units
+        :type y: float
+        :return: (index, distance in screen pixels) of the nearest vertex, or (None, None)
+            if `points` is empty
+        :rtype: tuple
+        """
+        if not points:
+            return None, None
+        px_x, px_y = self.view.viewPixelSize()
+        px_x = px_x or 1e-9
+        px_y = px_y or 1e-9
+        arr = np.array(points, dtype=float)
+        dx = (arr[:, 0] - x) / px_x
+        dy = (arr[:, 1] - y) / px_y
+        distances = np.hypot(dx, dy)
+        idx = int(np.argmin(distances))
+        return idx, float(distances[idx])
+
+    def vertex_within_grab_radius(self, points, x, y):
+        """Return the index of the vertex nearest to (x, y) if within the grab radius.
+
+        :param points: candidate vertices in view/data coordinates, native (x, y) order
+        :type points: list[tuple[float, float]]
+        :param x: query x coordinate in view/data units
+        :type x: float
+        :param y: query y coordinate in view/data units
+        :type y: float
+        :return: index of the nearest vertex, or None if none is within the grab radius
+        :rtype: int or None
+        """
+        idx, dist = self.nearest_vertex(points, x, y)
+        if idx is not None and dist <= VERTEX_GRAB_RADIUS_PX:
+            return idx
+        return None
+
+    def find_vertex_to_drag(self, entries, x, y):
+        """Hit-test (x, y) against the vertices of every entry (grid or polyline).
+
+        Searches across ALL entries in the container (not only the active one), so a
+        vertex of any grid/polyline can be grabbed and dragged.
+
+        :param entries: list of dicts with a 'points' key, e.g. ``self.grid_polygons``
+        :type entries: list[dict]
+        :param x: query x coordinate in view/data units
+        :type x: float
+        :param y: query y coordinate in view/data units
+        :type y: float
+        :return: (entry_index, vertex_index) of the closest vertex within the grab
+            radius across all entries, or (None, None) if none is close enough
+        :rtype: tuple
+        """
+        best_entry_idx, best_vertex_idx, best_dist = None, None, None
+        for entry_idx, entry in enumerate(entries):
+            idx, dist = self.nearest_vertex(entry['points'], x, y)
+            if idx is None or dist > VERTEX_GRAB_RADIUS_PX:
+                continue
+            if best_dist is None or dist < best_dist:
+                best_entry_idx, best_vertex_idx, best_dist = entry_idx, idx, dist
+        return best_entry_idx, best_vertex_idx
+
+    # Undo stack (add vertex / move vertex / delete grid or polyline)
+    def push_undo(self, action):
+        """Push an action onto the bounded undo stack.
+
+        :param action: description of the action; must include a 'type' key
+            ('add', 'move' or 'delete') and a 'kind' key ('grid' or 'polygon')
+        :type action: dict
+        """
+        self.undo_stack.append(action)
+        if len(self.undo_stack) > self.undo_stack_limit:
+            self.undo_stack.pop(0)
+
+    def undo_targets(self, kind):
+        """Return the container, list widget, active-index attribute name and display
+        refresh function for the given undo action kind.
+
+        :param kind: 'grid' or 'polygon'
+        :type kind: str
+        :rtype: tuple
+        """
+        if kind == 'grid':
+            return self.grid_polygons, self.grid_list, 'active_grid_index', self.update_grid_display
+        return self.drawing_polygons, self.polygon_list, 'active_polygon_index', self.update_polygon_display
+
+    def undo(self):
+        """Undo the most recent undoable action.
+
+        Covers adding a vertex, moving a vertex, and deleting a grid or polyline.
+        Manual points, brush strokes and filter results are not undoable. A no-op
+        when the undo stack is empty.
+        """
+        if not self.undo_stack:
+            return
+
+        action = self.undo_stack.pop()
+        entries, list_widget, active_attr, display_fn = self.undo_targets(action['kind'])
+
+        if action['type'] == 'add':
+            points = action['entry']['points']
+            idx = action['vertex_index']
+            if 0 <= idx < len(points):
+                del points[idx]
+        elif action['type'] == 'move':
+            points = action['entry']['points']
+            idx = action['vertex_index']
+            if 0 <= idx < len(points):
+                points[idx] = action['original_position']
+        elif action['type'] == 'delete':
+            self._undo_delete(action, entries, list_widget, active_attr)
+
+        display_fn()
+        self.recompute_roi_points()
+
+    def _undo_delete(self, action, entries, list_widget, active_attr):
+        """Restore a deleted grid/polyline entry at its original row and label.
+
+        If the deletion emptied the container, a placeholder entry was auto-inserted
+        to preserve the "always at least one entry" invariant; that placeholder is
+        removed first so the restore does not leave a stray empty extra entry.
+
+        :param action: the 'delete' undo action being restored
+        :type action: dict
+        :param entries: the live container to restore into (``grid_polygons`` or
+            ``drawing_polygons``)
+        :type entries: list[dict]
+        :param list_widget: the corresponding QListWidget
+        :type list_widget: QtWidgets.QListWidget
+        :param active_attr: name of the active-index attribute to update
+        :type active_attr: str
+        """
+        if action.get('was_only_entry') and len(entries) == 1:
+            del entries[0]
+            list_widget.takeItem(0)
+
+        row = min(action['row'], len(entries))
+        entries.insert(row, action['entry'])
+        list_widget.insertItem(row, action['label'])
+        setattr(self, active_attr, row)
+        list_widget.setCurrentRow(row)
+
     # Grid selection
     def handle_grid_drawing(self, event):
         pos = event.scenePos()
@@ -991,7 +1279,15 @@ class SelectionGUI(QtWidgets.QMainWindow):
                 self.grid_list.setCurrentRow(0)
 
             grid = self.grid_polygons[self.active_grid_index]
+
+            # Clicking on an existing vertex is a no-op (dragging is used to move it).
+            if self.vertex_within_grab_radius(grid['points'], x, y) is not None:
+                return
+
             grid['points'].append((x, y))
+            self.push_undo({
+                'type': 'add', 'kind': 'grid', 'entry': grid, 'vertex_index': len(grid['points']) - 1
+            })
 
             # Compute ROI points only if closed polygon
             if len(grid['points']) >= 3:
@@ -1008,13 +1304,28 @@ class SelectionGUI(QtWidgets.QMainWindow):
 
     def delete_selected_grid(self):
         row = self.grid_list.currentRow()
-        if row >= 0 and len(self.grid_polygons) > 1:
-            del self.grid_polygons[row]
-            self.grid_list.takeItem(row)
+        if row < 0:
+            return
+
+        self.push_undo({
+            'type': 'delete', 'kind': 'grid', 'entry': self.grid_polygons[row], 'row': row,
+            'label': self.grid_list.item(row).text(), 'was_only_entry': len(self.grid_polygons) == 1,
+        })
+
+        del self.grid_polygons[row]
+        self.grid_list.takeItem(row)
+
+        if not self.grid_polygons:
+            # Preserve the invariant that there is always at least one entry to draw into.
+            self.grid_polygons = [{'points': [], 'roi_points': []}]
+            self.grid_list.addItem("Grid 1")
+            self.active_grid_index = 0
+        else:
             self.active_grid_index = max(0, row - 1)
-            self.grid_list.setCurrentRow(self.active_grid_index)
-            self.update_grid_display()
-            self.update_selected_points()
+
+        self.grid_list.setCurrentRow(self.active_grid_index)
+        self.update_grid_display()
+        self.update_selected_points()
 
     def update_grid_display(self):
         # Combine all points from all grid polygons for scatter
@@ -1073,7 +1384,15 @@ class SelectionGUI(QtWidgets.QMainWindow):
                 self.polygon_list.setCurrentRow(0)
 
             poly = self.drawing_polygons[self.active_polygon_index]
+
+            # Clicking on an existing vertex is a no-op (dragging is used to move it).
+            if self.vertex_within_grab_radius(poly['points'], x, y) is not None:
+                return
+
             poly['points'].append((x, y))
+            self.push_undo({
+                'type': 'add', 'kind': 'polygon', 'entry': poly, 'vertex_index': len(poly['points']) - 1
+            })
 
             # Update ROI points only for this polygon
             if len(poly['points']) >= 2:
@@ -1086,13 +1405,28 @@ class SelectionGUI(QtWidgets.QMainWindow):
 
     def delete_selected_polygon(self):
         row = self.polygon_list.currentRow()
-        if row >= 0 and len(self.drawing_polygons) > 1:
-            del self.drawing_polygons[row]
-            self.polygon_list.takeItem(row)
+        if row < 0:
+            return
+
+        self.push_undo({
+            'type': 'delete', 'kind': 'polygon', 'entry': self.drawing_polygons[row], 'row': row,
+            'label': self.polygon_list.item(row).text(), 'was_only_entry': len(self.drawing_polygons) == 1,
+        })
+
+        del self.drawing_polygons[row]
+        self.polygon_list.takeItem(row)
+
+        if not self.drawing_polygons:
+            # Preserve the invariant that there is always at least one entry to draw into.
+            self.drawing_polygons = [{'points': [], 'roi_points': []}]
+            self.polygon_list.addItem("Polygon 1")
+            self.active_polygon_index = 0
+        else:
             self.active_polygon_index = max(0, row - 1)
-            self.polygon_list.setCurrentRow(self.active_polygon_index)
-            self.update_polygon_display()
-            self.update_selected_points()
+
+        self.polygon_list.setCurrentRow(self.active_polygon_index)
+        self.update_polygon_display()
+        self.update_selected_points()
 
     def update_polygon_display(self):
         all_pts = [pt for poly in self.drawing_polygons for pt in poly['points']]
@@ -1351,7 +1685,7 @@ class SelectionGUI(QtWidgets.QMainWindow):
         if self._paint_mask is None:
             return
 
-        pos = ev.pos()
+        pos = ev.scenePos()
         if self.view.sceneBoundingRect().contains(pos):
             mouse_point = self.view.mapSceneToView(pos)
             y, x = int(round(mouse_point.x())), int(round(mouse_point.y()))

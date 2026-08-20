@@ -42,6 +42,28 @@ print(f'{video.N} frames, {video.image_height} x {video.image_width} (height x w
 # Then switch to Filter mode (top toolbar) and try Shi-Tomasi / gradient
 # direction filtering on top of the selection.
 #
+# --- things to check specifically ------------------------------------------
+#
+# In Grid or 'Along the line' mode:
+#   * DRAG A VERTEX. Press within ~10 px of a corner you already placed and
+#     drag - it should follow the cursor, and the subsets should re-fill the
+#     new shape when you release. Dragging from empty space still pans.
+#   * CLICK EXACTLY ON A VERTEX. Nothing should happen. It used to drop a
+#     duplicate vertex on top of the existing one.
+#   * Ctrl+Z. Undoes a vertex move, a vertex add, or a grid/line delete. A
+#     deleted grid should come back at its ORIGINAL row in the list, not at
+#     the bottom. (Manual points and brush strokes are NOT undoable.)
+#   * DELETE THE ONLY GRID/LINE. With exactly one entry in the list, select it
+#     and hit delete - it should go. Previously this silently did nothing and
+#     you had to create a second one first.
+#   * The button above the list should read 'Start new grid' in Grid mode and
+#     'Start new line' in 'Along the line' mode.
+#
+# In Brush mode:
+#   * The painted area should now be centred ON the cursor. It used to land
+#     about 9 px up and to the left, because the drag handlers were reading
+#     ViewBox-local coordinates instead of scene coordinates.
+#
 # CLOSE THE WINDOW to continue.
 # ---------------------------------------------------------------------------
 

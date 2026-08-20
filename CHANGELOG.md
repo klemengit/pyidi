@@ -51,6 +51,36 @@ development was not reachable from the documented workflow. There is now one.
 - The napari `GUI` now routes its selections through `set_points()` as well, so
   points picked in the UI get the same checks as programmatic ones.
 
+### `SelectionGUI` editing
+
+- **The last remaining grid or polyline can now be deleted.** Previously the
+  delete button silently did nothing when only one entry was left, so you had to
+  create a second grid just to remove the first. Deleting the last entry now
+  works and re-seeds an empty one, which is what the old guard was clumsily
+  protecting against.
+- **Polygon and grid vertices can be dragged.** A left-drag starting within ~10
+  screen pixels of an existing vertex moves it; a drag anywhere else still pans,
+  and the grab radius is constant in screen pixels at any zoom. Clicking exactly
+  on an existing vertex is now a no-op rather than adding a duplicate on top of
+  it. The derived subset points are recomputed once when the drag finishes, not
+  on every mouse-move.
+- **Undo (Ctrl+Z)** for adding a vertex, moving a vertex, and deleting a grid or
+  polyline. A restored grid comes back at its original row with its original
+  label. Manual points, brush strokes and filter results are not undoable.
+- The "Start new line" button now reads "Start new grid" in Grid mode. The
+  status-bar hint said "Click 'Start new line' to begin a new grid" and now
+  matches the button.
+
+### Fixed
+
+- **Mouse drags were offset from the cursor by 9 pixels.** The drag handlers read
+  `ev.pos()`/`ev.buttonDownPos()`, which are local to the ViewBox, and passed them
+  to `mapSceneToView()` and `sceneBoundingRect().contains()`, which expect scene
+  coordinates. The click handlers already used `scenePos()` and were correct, so
+  clicking and dragging disagreed. Most visibly this meant the **brush painted
+  about 9 px away from the cursor**, and its bounds check was wrong by the same
+  amount. All drag paths now use `scenePos()`/`buttonDownScenePos()`.
+
 ### Other
 
 - New `pyidi/selection_geometry.py` holds the ROI-grid geometry as pure numpy,
