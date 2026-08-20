@@ -22,7 +22,7 @@ Optional extras
 ^^^^^^^^
 
 Installs napari, PyQt6, pyqtgraph, and magicgui — required for any GUI usage
-(``SelectionGUI``, ``ResultViewer``, ``GUI``, ``SubsetSelection``).
+(``SelectionGUI``, ``ResultViewer``, ``GUI``).
 Without this extra, importing those classes raises a ``RuntimeError``.
 
 .. code:: bash

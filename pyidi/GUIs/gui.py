@@ -7,7 +7,7 @@ import warnings
 warnings.simplefilter("default")
 
 from .. import tools
-from . import selection
+from ..selection_geometry import get_roi_grid
 from ..methods import SimplifiedOpticalFlow
 from ..methods import LucasKanade
 
@@ -248,25 +248,43 @@ class GUI:
                 self.ConfigWidget = viewer.window.add_dock_widget(lk_config_widget, name='Configure - LK', add_vertical_stretch=add_vertical_stretch)
 
 
-    def base_set_points_widget(self,viewer, subset_size, noverlap, show_subset_box):
+    def _gather_points(self, viewer, subset_size, noverlap):
+        """Collect the points from the napari layers.
+
+        Individual picks are taken from the 'Points' layer; if an area has been
+        drawn in 'Area Selection', a regular grid is generated inside it instead.
+        """
         #individual points selection
         if viewer.layers['Area Selection'].data == []:
-            self.method.points = np.round(viewer.layers['Points'].data).astype(int)
-        
-        #area selection for grid
-        else:
-            border = viewer.layers['Area Selection'].data[0].T # shape data
-                
-            if viewer.layers['Area Deselection'].data == []:
-                deselect_border = [[],[]]
-            else:     
-                deselect_border = viewer.layers['Area Deselection'].data[0].T # deselection shape data
+            return np.round(viewer.layers['Points'].data).astype(int)
 
-            self.method.points = selection.get_roi_grid(
-                polygon_points=border, 
-                roi_size=subset_size,
-                noverlap=noverlap, 
-                deselect_polygon=deselect_border) # get grid points
+        #area selection for grid
+        border = viewer.layers['Area Selection'].data[0].T # shape data
+
+        if viewer.layers['Area Deselection'].data == []:
+            deselect_border = [[],[]]
+        else:
+            deselect_border = viewer.layers['Area Deselection'].data[0].T # deselection shape data
+
+        return get_roi_grid(
+            polygon_points=border,
+            roi_size=subset_size,
+            noverlap=noverlap,
+            deselect_polygon=deselect_border) # get grid points
+
+    def base_set_points_widget(self,viewer, subset_size, noverlap, show_subset_box):
+        points = self._gather_points(viewer, subset_size, noverlap)
+
+        # Route through set_points so the GUI gets the same validation (bounds,
+        # dtype, shape) as the programmatic API, instead of writing .points directly.
+        if len(points):
+            try:
+                self.method.set_points(points)
+            except ValueError as e:
+                warnings.warn(f'Points were not set: {e}')
+                return
+        else:
+            self.method.points = points
 
         if 'Subsets' in viewer.layers:
             viewer.layers.pop('Subsets') # refresh ROI layer
@@ -280,15 +298,23 @@ class GUI:
 
         if len(self.method.points) == 0:
             del self.method.points
-        
+
+        self._remove_dock_widget(viewer, 'ConfigWidget')
+        self._remove_dock_widget(viewer, 'DisplacementWidget')
+
+
+    def _remove_dock_widget(self, viewer, attr_name):
+        """Remove a dock widget by attribute name, if it is currently docked.
+
+        A widget that was never created, or has already been removed, is not an
+        error - the downstream widgets are rebuilt whenever the points change.
+        """
+        widget = getattr(self, attr_name, None)
+        if widget is None:
+            return
         try:
-            viewer.window.remove_dock_widget(self.ConfigWidget)
-        except:
-            pass
-            
-        try:
-            viewer.window.remove_dock_widget(self.DisplacementWidget)
-        except:
+            viewer.window.remove_dock_widget(widget)
+        except (LookupError, ValueError, RuntimeError):
             pass
 
 

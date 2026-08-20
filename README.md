@@ -91,20 +91,20 @@ displacements = method.displacements
 The `pyIDI` method works with various formats: `.cih`, `.cihx`, `.png`, `.avi` etc. Additionally, it can also work with `numpy.ndarray` as input.
 If an array is passed, it must have a shape of: ``(n time points, image height, image width)``.
 
-Set the points where displacements will be determined:
+Set the points where displacements will be determined. `VideoReader` has no `set_points` method — points are set on the method object (e.g. `method = gui.method` from above, or a directly instantiated method such as `sof` above):
 ```
 p = np.array([[0, 1], [1, 1], [2, 1]]) # example of points
-video.set_points(points=p)
+method.set_points(points=p)
 ```
 Or use point selection UI to set individual points or grid inside selected area. For more information about UI see [documentation](https://pyidi.readthedocs.io/en/quick_start/napari.html). Launch viewer with:
 
 
 # DEVELOPER GUIDELINES:
-* Add _name_of_method.py with class that inherits after `IDIMethods`
-* This class must have methods:
-	* `calculate_displacements` with attribute `displacements`
-	* `get_points` (static method - sets attribute video.points)
-* In `pyIDI` add a new method of identification in `avaliable_methods` dictionary.
+* Add `_name_of_method.py` with a class that inherits from `IDIMethod`
+* This class must implement:
+	* `configure()` - every parameter must be stored as a class attribute of the same name (this is what makes settings reproducible/picklable/exportable to JSON)
+	* `calculate_displacements()` - sets the `displacements` attribute, with shape `(n_points, n_frames, 2)`
+* Export the new class in `pyidi/methods/__init__.py`.
 
 # Citing
 If you are using the `pyIDI` package for your research, consider citing our articles:

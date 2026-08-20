@@ -56,7 +56,7 @@ Points must be of shape ``n_points x 2``:
               [1, 5],
               [2, 10]]
 
-where the first column indicates indices along **axis 0**, and the second column indices along **axis 1**.
+where the first column is the **row** (``y``, axis 0) coordinate, and the second column is the **column** (``x``, axis 1) coordinate.
 
 The points must be passed to ``method`` object:
 
@@ -110,7 +110,7 @@ Directory content after the analysis:
     
         * points.pkl
         * results.pkl
-        * settings.txt
+        * settings.json
 
 Loading saved analysis
 ----------------------

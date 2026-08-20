@@ -3,8 +3,9 @@ import numpy as np
 from PyQt6 import QtWidgets, QtCore
 from pyqtgraph import GraphicsLayoutWidget, ImageItem, ScatterPlotItem
 import pyqtgraph as pg
-from matplotlib.path import Path
 # import pyidi  # Assuming pyidi is a custom module for video handling
+
+from ..selection_geometry import points_along_polygon, rois_inside_polygon, rois_inside_mask
 
 class BrushViewBox(pg.ViewBox):
     def __init__(self, parent_gui, *args, **kwargs):
@@ -92,6 +93,17 @@ class SelectionGUI(QtWidgets.QMainWindow):
         ----------
         video : VideoReader or np.ndarray
             The video to be analyzed. If a VideoReader object, it should be initialized with the video file.
+            If a np.ndarray, it can be either a single 2-D image (height, width) or a 3-D frame stack
+            (n_frames, height, width), in which case the first frame is displayed.
+        subset_size : int, optional
+            Initial side length (in pixels) of the square subset drawn around each selected point.
+            Sets the starting value of the "Subset size" spinbox/slider used when computing ROI
+            rectangles, grid/line spacing and automatic feature filtering. Defaults to 11.
+        subset_overlap : int, optional
+            Initial spacing (in pixels) between neighbouring subsets, used as the "Distance between
+            subsets" spinbox/slider value for the Grid, Along the line and Brush selection methods.
+            A positive value adds a gap between subsets, a negative value makes them overlap.
+            Defaults to 0.
         """
         app = QtWidgets.QApplication.instance()
         if app is None:
@@ -216,7 +228,18 @@ class SelectionGUI(QtWidgets.QMainWindow):
         from ..video_reader import VideoReader
         if isinstance(video, VideoReader):
             self.frame = video.get_frame(0)
-            
+        elif isinstance(video, np.ndarray) and video.ndim == 3:
+            # (n_frames, height, width) - take the first frame
+            self.frame = video[0]
+        elif isinstance(video, np.ndarray) and video.ndim == 2:
+            # (height, width) - a single image
+            self.frame = video
+        else:
+            raise TypeError(
+                f"`video` must be a VideoReader, or a 2-D (height, width) or 3-D "
+                f"(n_frames, height, width) np.ndarray, got {type(video).__name__!r}."
+            )
+
         self.image_item.setImage(self.frame.T) # axis 0 is x, while image axis 0 is y
 
         # Ensure method-specific widgets are visible on startup
@@ -1486,70 +1509,6 @@ class SelectionGUI(QtWidgets.QMainWindow):
         
         self.show_instruction("Y (vertical) direction preset applied.")
 
-def points_along_polygon(polygon, subset_size, spacing=0):
-    if len(polygon) < 2:
-        return []
-
-    step = subset_size + spacing
-    if step <= 0:
-        step = 1
-
-    result_points = []
-
-    for i in range(len(polygon) - 1):
-        p1 = np.array(polygon[i])
-        p2 = np.array(polygon[i + 1])
-        segment = p2 - p1
-        length = np.linalg.norm(segment)
-
-        if length == 0:
-            continue
-
-        direction = segment / length
-        n_points = int(length // step)
-
-        for j in range(n_points + 1):
-            pt = p1 + j * step * direction
-            result_points.append((round(pt[0] - 0.5), round(pt[1] - 0.5)))
-
-    return result_points
-
-def rois_inside_polygon(polygon, subset_size, spacing):
-    if len(polygon) < 3:
-        return []
-
-    polygon = np.array(polygon)
-    min_x, max_x = int(np.floor(np.min(polygon[:, 0]))), int(np.ceil(np.max(polygon[:, 0])))
-    min_y, max_y = int(np.floor(np.min(polygon[:, 1]))), int(np.ceil(np.max(polygon[:, 1])))
-
-    step = subset_size + spacing
-    if step <= 0:
-        step = 1  # minimum step to avoid infinite loop
-    xs = np.arange(min_x, max_x+1, step)
-    ys = np.arange(min_y, max_y+1, step)
-
-    grid_x, grid_y = np.meshgrid(xs, ys)
-    points = np.vstack([grid_x.ravel(), grid_y.ravel()]).T
-
-    mask = Path(polygon).contains_points(points)
-    return [tuple(p) for p in points[mask]]
-
-def rois_inside_mask(mask, subset_size, spacing):
-    step = subset_size + spacing
-    if step <= 0:
-        step = 1
-
-    h, w = mask.shape
-    xs = np.arange(0, w, step)
-    ys = np.arange(0, h, step)
-    grid_x, grid_y = np.meshgrid(xs, ys)
-
-    candidate_points = np.vstack([grid_y.ravel(), grid_x.ravel()]).T  # (y, x)
-
-    # Only keep points where the mask is True
-    selected = [tuple(p) for p in candidate_points if mask[p[0], p[1]]]
-    return selected
-
 if __name__ == "__main__":
     # import pyidi
     # filename = "data/data_showcase.cih"
@@ -1561,7 +1520,6 @@ if __name__ == "__main__":
     from PIL import Image
     import io
     import numpy as np
-    import matplotlib.pyplot as plt
     # Example black and white image (public domain)
     url = "https://raw.githubusercontent.com/scikit-image/scikit-image/main/skimage/data/camera.png"
     # Fetch the image

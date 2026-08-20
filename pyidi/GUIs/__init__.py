@@ -25,4 +25,10 @@ else:
         def __init__(self, *args, **kwargs):
             raise RuntimeError("GUI requires the qt extras: pip install pyidi[qt]")
 
-from .selection import SubsetSelection
+class SubsetSelection:
+    def __init__(self, *args, **kwargs):
+        raise RuntimeError(
+            "SubsetSelection was removed in favour of SelectionGUI. "
+            "Replace SubsetSelection(...) with "
+            "SelectionGUI(video, subset_size=..., subset_overlap=...)."
+        )

@@ -3,6 +3,68 @@
 This changelog starts at version 1.4.0. For earlier versions see the
 [commit history](https://github.com/ladisk/pyidi/commits/master).
 
+## Unreleased
+
+### Point selection consolidated on `SelectionGUI`
+
+pyidi had accumulated five separate point-selection implementations. Three were
+dead code, one was documented but no longer developed, and the one under active
+development was not reachable from the documented workflow. There is now one.
+
+- **`SubsetSelection` has been removed.** The tkinter widget in
+  `pyidi/GUIs/selection.py` is gone, and `SelectionGUI` replaces it. The name is
+  still importable, but instantiating it raises a `RuntimeError` naming the
+  replacement, so existing scripts fail with an actionable message rather than an
+  `ImportError`. Replace `SubsetSelection(video, roi_size=(21, 21), noverlap=0)`
+  with `SelectionGUI(video, subset_size=21, subset_overlap=0)`.
+- **`SelectionGUI` is now the documented interface.** It offers five selection
+  methods (grid in a polygon, manual points, along a polyline, brush, and
+  remove-point) plus automatic filtering by Shi-Tomasi corner strength or
+  gradient direction. It requires the Qt extras: `pip install pyidi[qt]`.
+- **Note for `LucasKanade` users:** `SubsetSelection` accepted an anisotropic
+  `roi_size=(y, x)`; `SelectionGUI` currently takes a scalar `subset_size` and
+  can only select square subsets. `LucasKanade.configure(roi_size=...)` still
+  accepts a `(vertical, horizontal)` pair, so non-square ROIs remain available
+  programmatically and through the napari `GUI`, just not through `SelectionGUI`.
+- Removed the dead selection code: `tools.ManualROI`, `tools.GridOfROI` (both
+  read a `video.reader.mraw` attribute that no longer exists), the unreachable
+  `PickPoints` class in `_simplified_optical_flow.py`, and the stray
+  `load_analysis copy.py`.
+
+### Point validation
+
+`set_points()` now validates its input instead of accepting almost anything.
+
+- Empty input, non-2-D input, a wrong column count, and coordinates outside the
+  image now raise `ValueError` with a message that says what was wrong. Empty and
+  1-D input previously raised `IndexError: tuple index out of range`; out-of-range
+  and negative coordinates were previously accepted silently, which since 1.4.0
+  surfaced only as a `NaN` result much later.
+- **Sub-pixel points are now rounded to the nearest pixel, with a warning.**
+  Previously the same float input crashed in `SimplifiedOpticalFlow` (used
+  directly as an array index) but was silently truncated *toward zero* in
+  `LucasKanade`, `DirectionalLucasKanade`, and `DIC`. All four now agree, and
+  round rather than truncate.
+- `set_points()` accepts any object exposing a `.points` attribute, so a
+  selection GUI instance can be passed directly. Previously only `SubsetSelection`
+  was recognised, and passing the Qt GUI failed with an opaque error.
+- The napari `GUI` now routes its selections through `set_points()` as well, so
+  points picked in the UI get the same checks as programmatic ones.
+
+### Other
+
+- New `pyidi/selection_geometry.py` holds the ROI-grid geometry as pure numpy,
+  with no GUI-toolkit dependency, shared by the napari `GUI` and `SelectionGUI`.
+  Its functions do not share one coordinate convention - each docstring states
+  which one it uses, and the tests pin the difference deliberately.
+- `SelectionGUI` accepts a numpy array as documented. A 2-D or 3-D array
+  previously raised `AttributeError` because the frame was only set for a
+  `VideoReader`; anything unusable now raises `TypeError`.
+- First tests for the GUI package: `tests/test_selection_geometry.py` and
+  `tests/test_set_points_validation.py` (24 tests).
+- Fixed `README.md`, which told users to call `video.set_points(...)`.
+  `VideoReader` has no such method - points are set on the method object.
+
 ## 1.4.0
 
 ### Lucas-Kanade performance
