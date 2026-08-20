@@ -5,6 +5,11 @@ Napari image viewer
 
 Interactive image viewer **napari** is implemented and can be used for viewing video and selecting points. More information about napari can be obtained `here <https://napari.org/>`_.
 
+The napari ``GUI`` covers the whole workflow — selecting points, configuring
+the method and running the identification — in one window. For point selection
+on its own, with grids, polylines, a brush and automatic filtering, use
+:ref:`SelectionGUI <point-selection>` instead.
+
 .. note::
 
    The ``GUI`` class requires the Qt/napari dependencies. Install pyIDI with the ``[qt]`` extras before using this module::

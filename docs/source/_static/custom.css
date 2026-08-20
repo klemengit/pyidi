@@ -1,0 +1,50 @@
+/* pyIDI documentation - small refinements on top of sphinx-book-theme. */
+
+:root {
+    --pyidi-accent: #0b6e99;
+}
+
+/* Landing-page cards: keep the grid calm and make the whole card feel clickable. */
+.sd-card {
+    border-radius: 0.5rem;
+    transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+
+.sd-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 0.5rem 1rem rgba(0, 0, 0, 0.12);
+}
+
+.sd-card-title {
+    font-weight: 600;
+}
+
+/* Signatures of documented classes and functions are easier to scan with a
+   little more separation from the description that follows. */
+dl.py.class > dt,
+dl.py.function > dt,
+dl.py.method > dt {
+    border-left: 3px solid var(--pyidi-accent);
+    padding-left: 0.6rem;
+    background: var(--pst-color-surface);
+}
+
+/* Wide tables (the method comparison, the benchmark numbers) should scroll
+   rather than overflow the content column. */
+table.docutils {
+    display: block;
+    overflow-x: auto;
+    width: fit-content;
+    max-width: 100%;
+}
+
+/* GIFs and screenshots in the tutorials. */
+img {
+    max-width: 100%;
+    height: auto;
+}
+
+.pyidi-screenshot img {
+    border: 1px solid var(--pst-color-border);
+    border-radius: 0.4rem;
+}

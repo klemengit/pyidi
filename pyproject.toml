@@ -57,6 +57,8 @@ dev = [
     "pytest",
     "sphinx-book-theme",
     "sphinx-copybutton",
+    "sphinx-design",
+    "myst-parser",
     "nbsphinx",
     "nbsphinx_link",
     "ipykernel",

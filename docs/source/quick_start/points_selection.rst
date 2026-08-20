@@ -31,7 +31,10 @@ A ``SelectionGUI`` window can then be opened:
 
     gui = SelectionGUI(video, subset_size=11, subset_overlap=0)
 
-where ``subset_size`` is the side length (in pixels) of the
+The window is modal: the call blocks until you close it, and execution
+continues on the next line with the selection available on the object.
+
+Here, ``subset_size`` is the side length (in pixels) of the
 Region-Of-Interest/subset drawn around each point, and ``subset_overlap``
 sets the spacing between neighbouring subsets (the step between subset
 centers is ``subset_size + subset_overlap``, so a positive value spreads the
@@ -53,8 +56,9 @@ buttons on the right:
 
 - **Grid**: click to place the corners of a polygon; once at least three
   corners are placed, a regular grid of subsets is generated inside the
-  polygon. Multiple grids can be created (``Start new line``) and managed
-  individually in the list, and deleted with ``Delete selected grid``.
+  polygon. Multiple grids can be created (``Start new grid``) and managed
+  individually in the list, and deleted with ``Delete selected grid`` —
+  including the last remaining one, which is then re-seeded empty.
 - **Manual**: click on the image to add individual points one at a time.
 - **Along the line**: click to place points defining a polyline; subsets are
   placed at regular intervals along its segments. As with ``Grid``, multiple
@@ -70,6 +74,23 @@ the subset rectangle overlay (``Show subsets``), and clear the current
 selection (``Clear selections``). For ``Grid``, ``Along the line``, and
 ``Brush``, a ``Distance between subsets`` control sets the spacing described
 above.
+
+Editing a selection
+-------------------
+
+Grids and polylines stay editable after they are drawn.
+
+**Moving a vertex.** A left-drag that starts within about 10 screen pixels of
+an existing vertex moves that vertex; a drag anywhere else pans the view. The
+grab radius is constant in screen pixels, so it behaves the same at any zoom.
+The subsets are recomputed once, when the drag finishes. Clicking exactly on
+an existing vertex does nothing, rather than stacking a duplicate on top of
+it.
+
+**Undo (Ctrl+Z)** reverses adding a vertex, moving a vertex, and deleting a
+grid or polyline. A restored grid comes back at its original position in the
+list, with its original label. Manual points, brush strokes and filter results
+are *not* undoable.
 
 Filter mode
 -----------

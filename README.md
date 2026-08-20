@@ -1,114 +1,127 @@
 [![Documentation Status](https://readthedocs.org/projects/pyidi/badge/?version=latest)](https://pyidi.readthedocs.io/en/latest/?badge=latest)
 ![example workflow](https://github.com/ladisk/pyidi/actions/workflows/python_package_testing.yaml/badge.svg)
 
-# pyidi
-Image-based Displacement Identification (IDI) implementation in python.
+# pyIDI
 
-See the [documentation](https://pyidi.readthedocs.io/en/latest/index.html) for `pyIDI`.
+**Image-based Displacement Identification (IDI)** from high-speed video, in Python.
 
-## Now version 1.0!
+pyIDI reads a recording, tracks the points you select, and returns their sub-pixel
+displacement history — ready for modal analysis.
 
-In version 1.0, **we overhauled the package API**. With growing usage in IDEs other than
-jupyter notebooks, we have made the package more user-friendly. The new API allows the
-autocompletion and documentation of the package to be more accessible in IDEs like
-VSCode, Cursor, PyCharm, etc.
+📖 [**Documentation**](https://pyidi.readthedocs.io/en/latest/index.html)
 
-To install the new version, use the following command:
+## Installation
 
 ```bash
-pip install pyidi
-```
-or to upgrade (if already installed):
-```bash
-pip install -U pyidi
+pip install pyidi          # identification
+pip install pyidi[qt]      # + the point-selection and result-viewing GUIs
 ```
 
-### Whats different?
+Python >= 3.10.
 
-For the user, the main difference is that instead of calling the `pyIDI` class where the
-method is set, first, the `VideoReader` class is called. Then, this instance is passed
-to the specific method class. Here is an example:
+## Quick start
 
 ```python
-from pyidi import VideoReader, SimplifiedOpticalFlow
+from pyidi import VideoReader, LucasKanade
 
-# Read the video
-video = VideoReader('video.cih')
+video = VideoReader('measurement.cih')
 
-# Pass the video to the selected method class
-sof = SimplifiedOpticalFlow(video)
+lk = LucasKanade(video)
+lk.set_points(points=[[150, 200], [150, 260], [150, 320]])   # (row, column)
+lk.configure(roi_size=(21, 21))
 
-sof.set_points(points=[[0, 1], [1, 1], [2, 1]])
-sof.configure(...)
-displacements = sof.get_displacements()
+displacements = lk.get_displacements()   # (n_points, n_frames, 2), in pixels
 ```
 
-The methods themselves have not changed, only the way they are called. Unfortunately, this
-breaks the backward compatibility with the previous version. We apologize for any
-inconvenience this may cause. To keep using the old version, please install the package
-with the following command:
+`VideoReader` handles Photron `.cih`/`.cihx`, Phantom `.cine`, Pharsighted `.SLOW`,
+image sequences, ordinary video files (MP4, AVI, MOV, ...), and `numpy.ndarray`
+stacks of shape `(n_time_points, image_height, image_width)`.
 
-```bash
-pip install pyidi==0.30.2
-```
-or when using .cine videos:
-```bash
-pip install pyidi[cine]
-```
-or use the legacy `pyIDI` class:
+Points are set on the **method** object, not on the `VideoReader`.
+
+### Selecting points interactively
 
 ```python
-from pyidi import pyIDI
+from pyidi import SelectionGUI
+
+gui = SelectionGUI(video, subset_size=21)
+lk.set_points(gui)
 ```
 
-Note that the legacy `pyIDI` class does not necessarily offer the full functionality of the new version. 
-The legacy `pyIDI` class is only kept for compatibility with the old version and will not be updated.
+`SelectionGUI` offers a grid inside a polygon, manual points, points along a
+polyline, a brush, and automatic filtering onto well-textured image content —
+plus vertex dragging and undo. See the
+[documentation](https://pyidi.readthedocs.io/en/latest/quick_start/points_selection.html).
 
+<img src="docs/source/quick_start/selection.gif" width="800" />
 
-# Use Napari UI for quick displacement identification:
-<img src="docs/source/quick_start/gifs/napari_full_sof.gif" width="800" />
+### Or drive everything from the napari UI
 
-
-# BASIC USAGE:
-Run GUI by instantiating GUI class (input is VideoReader object):
 ```python
 from pyidi import VideoReader, GUI
 
-# Read the video
 video = VideoReader('data/data_synthetic.cih')
-
-# Run GUI
 gui = GUI(video)
+
+displacements = gui.method.displacements
 ```
 
-Method class (e.g. `SimplifiedOpticalFlow`) is instantiated during the use of GUI. It is accessible in `gui.method`. To get displacements:
+<img src="docs/source/quick_start/gifs/napari_full_sof.gif" width="800" />
+
+## Methods
+
+| Method | Solves for | Use it when |
+| --- | --- | --- |
+| `SimplifiedOpticalFlow` | 2 translations, from the image gradient | a fast first look, motion well below a pixel |
+| `LucasKanade` | 2 translations, iteratively | the default choice |
+| `DirectionalLucasKanade` | 1 translation along a known direction | motion along a known axis; edge-like features |
+| `DIC` | 6 (affine) or 3 (rigid) warp parameters | strain and in-plane rotation, not just translation |
+
+The Lucas-Kanade inner loop is compiled with `numba` and parallelized over points —
+one to two orders of magnitude faster than the NumPy implementation.
+
+## Pre-test motion visualization
+
+Eulerian video magnification amplifies subtle, sub-pixel motion directly in the raw
+recording, before any identification is run — useful for checking whether and where
+a structure moves, and for isolating a single mode:
 
 ```python
-method = gui.method
-displacements = method.displacements
+from pyidi.postprocessing import EulerianMagnifier
+
+evm = EulerianMagnifier(video)
+evm.configure(freq_band=(45.0, 55.0), amplification=25)
+evm.save('mode_50Hz', output_format='mp4')
 ```
 
-The `pyIDI` method works with various formats: `.cih`, `.cihx`, `.png`, `.avi` etc. Additionally, it can also work with `numpy.ndarray` as input.
-If an array is passed, it must have a shape of: ``(n time points, image height, image width)``.
+This is qualitative visualization, **not** a measurement.
 
-Set the points where displacements will be determined. `VideoReader` has no `set_points` method — points are set on the method object (e.g. `method = gui.method` from above, or a directly instantiated method such as `sof` above):
-```
-p = np.array([[0, 1], [1, 1], [2, 1]]) # example of points
-method.set_points(points=p)
-```
-Or use point selection UI to set individual points or grid inside selected area. For more information about UI see [documentation](https://pyidi.readthedocs.io/en/quick_start/napari.html). Launch viewer with:
+## Upgrading
 
+Version 1.0 replaced the monolithic `pyIDI` class with a `VideoReader` plus a
+separate method class, so that autocompletion and inline documentation work
+properly in VSCode, PyCharm and similar editors. Later releases removed the old
+`SubsetSelection` widget and changed how untrackable points are reported.
 
-# DEVELOPER GUIDELINES:
-* Add `_name_of_method.py` with a class that inherits from `IDIMethod`
-* This class must implement:
-	* `configure()` - every parameter must be stored as a class attribute of the same name (this is what makes settings reproducible/picklable/exportable to JSON)
-	* `calculate_displacements()` - sets the `displacements` attribute, with shape `(n_points, n_frames, 2)`
+See the [upgrading guide](https://pyidi.readthedocs.io/en/latest/migration.html)
+for what to change. The legacy class is still importable
+(`from pyidi import pyIDI`) for compatibility, but is not being developed.
+
+## Developer guidelines
+
+* Add `pyidi/methods/_name_of_method.py` with a class that inherits from `IDIMethod`.
+* The class must implement:
+  * `configure()` — every parameter stored as a class attribute of the same name
+    (this is what makes settings reproducible, picklable and exportable to JSON);
+  * `calculate_displacements()` — sets `self.displacements`, of shape
+    `(n_points, n_frames, 2)`.
 * Export the new class in `pyidi/methods/__init__.py`.
 
-# Citing
-If you are using the `pyIDI` package for your research, consider citing our articles:
-- Masmeijer, T., Habtour, E., Zaletelj, K., & Slavič, J. (2024). **Directional DIC method with automatic feature selection**. Mechanical Systems and Signal Processing, 224 . https://doi.org/10.1016/j.ymssp.2024.112080
+## Citing
+
+If you are using `pyIDI` for your research, consider citing our articles:
+
+- Masmeijer, T., Habtour, E., Zaletelj, K., & Slavič, J. (2024). **Directional DIC method with automatic feature selection**. Mechanical Systems and Signal Processing, 224. https://doi.org/10.1016/j.ymssp.2024.112080
 - Čufar, K., Slavič, J., & Boltežar, M. (2024). **Mode-shape magnification in high-speed camera measurements**. Mechanical Systems and Signal Processing, 213, 111336. https://doi.org/10.1016/J.YMSSP.2024.111336
 - Zaletelj, K., Gorjup, D., Slavič, J., & Boltežar, M. (2023). **Multi-level curvature-based parametrization and model updating using a 3D full-field response**. Mechanical Systems and Signal Processing, 187, 109927. https://doi.org/10.1016/j.ymssp.2022.109927
 - Zaletelj, K., Slavič, J., & Boltežar, M. (2022). **Full-field DIC-based model updating for localized parameter identification**. Mechanical Systems and Signal Processing, 164. https://doi.org/10.1016/j.ymssp.2021.108287

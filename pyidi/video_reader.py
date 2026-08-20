@@ -154,11 +154,13 @@ class VideoReader:
 
         :param frame_number: frame number
         :type frame_number: int
-        :param args: additional arguments to be passed to the image readers to handle 
-        multiple channels in image
-        :param kwargs: additional keyword arguments forwarded to image/video reader methods
+        :param args: additional arguments to be passed to the image readers to
+            handle multiple channels in image
+        :param kwargs: additional keyword arguments forwarded to image/video
+            reader methods
         :type kwargs: dict
         :return: image (monochrome)
+        :rtype: numpy.ndarray
         """
         if not 0 <= frame_number < self.N:
             raise ValueError("Frame number exceeds total frame number!")

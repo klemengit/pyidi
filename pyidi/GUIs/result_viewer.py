@@ -61,7 +61,8 @@ class Viewer(QtWidgets.QMainWindow):
         video : np.ndarray or VideoReader
             Array of shape (n_frames, height, width) containing the video frames.
         displacements : np.ndarray
-            Array of shape (n_frames, n_points, 2) for time-series displacements OR
+            Array of shape (n_points, n_frames, 2) for time-series displacements
+            (as returned by ``get_displacements``) OR
             Array of shape (n_points, 2) for mode shapes.
         points : np.ndarray
             Array of shape (n_points, 2) containing the grid points.
@@ -97,7 +98,7 @@ class Viewer(QtWidgets.QMainWindow):
                 self.displacements = displacements[:, ::-1]  # Flip x,y coordinates
                 self.time_per_period = 1.0 # Seconds
             else:
-                # Time-series displacements: shape (n_frames, n_points, 2)
+                # Time-series displacements: shape (n_points, n_frames, 2)
                 self.is_mode_shape = False
                 self.displacements = displacements[:, :, ::-1]  # Flip x,y coordinates
 

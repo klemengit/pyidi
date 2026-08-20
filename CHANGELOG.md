@@ -5,6 +5,34 @@ This changelog starts at version 1.4.0. For earlier versions see the
 
 ## Unreleased
 
+### Documentation overhaul
+
+The documentation was restructured around the work done since 1.3.3. New
+pages: Eulerian video magnification, reading a video (all supported formats,
+including `.cine`, and the frame-rate caveats), results and reproducibility
+(where analyses are saved, `load_analysis`, resuming, and what a `NaN` in the
+result means), and an upgrading guide covering `SubsetSelection` ->
+`SelectionGUI`, `use_numba` -> `use_compiled_kernel`, the stricter
+`set_points()` contract, and the pre-1.0 `pyIDI` class.
+
+The methods page gained a "choosing a method" comparison, a parameter table
+per method, and a section on prescribed rigid-body motion in
+`DirectionalLucasKanade`. The mode-shape magnification and fiducial-marker
+pages, previously stubs reading "more documentation is coming soon", now
+document the actual API. `CHANGELOG.md` is rendered into the documentation.
+
+Sphinx gained `sphinx-design` (landing-page cards), `myst-parser` (Markdown),
+`napoleon` (the Google-style docstrings in `fiducial.py` render correctly now)
+and `intersphinx` (links into the numpy, scipy and Python documentation). The
+build is warning-free.
+
+Two source-level fixes fell out of writing this: `ResultViewer` documented its
+`displacements` argument as `(n_frames, n_points, 2)` when it indexes it as
+`(n_points, n_frames, 2)` — the shape `get_displacements()` actually returns —
+and `VideoReader.get_frame`'s docstring had a mis-indented field that broke
+its rendering. The old documentation also claimed `load_analysis()` returns
+two values; it returns three (`video, idi, settings`).
+
 ### Eulerian video magnification
 
 New `EulerianMagnifier` class in `pyidi.postprocessing` (also available as a
