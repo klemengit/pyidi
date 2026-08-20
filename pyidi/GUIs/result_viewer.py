@@ -102,7 +102,11 @@ class Viewer(QtWidgets.QMainWindow):
                 self.displacements = displacements[:, :, ::-1]  # Flip x,y coordinates
 
             self.grid = points[:, ::-1] + 0.5  # Flip x,y coordinates
-            self.disp_max = np.max(np.abs(displacements))
+            abs_displacements = np.abs(displacements)
+            if np.all(np.isnan(abs_displacements)):
+                self.disp_max = 1.0  # fallback when every point failed to track
+            else:
+                self.disp_max = np.nanmax(abs_displacements)
         else:
             self.displacements = None
             self.grid = None

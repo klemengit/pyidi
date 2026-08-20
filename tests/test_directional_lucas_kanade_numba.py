@@ -136,6 +136,48 @@ def test_numba_matches_numpy_frame_by_frame_with_offsets():
                          compiled.displacements[:, 1, :])
 
 
+def test_resume_keeps_a_previously_failed_point_nan():
+    """A checkpoint's NaN row must not be cast to int and "recover".
+
+    Mirrors the same guard in ``LucasKanade``: ``resume_analysis`` restores
+    ``displacements`` from a checkpoint (see ``IDIMethod.resume_temp_files``),
+    but ``failed_points`` itself is not persisted and is reset to ``{}`` on
+    every run, so a point that was already NaN when the checkpoint was written
+    is no longer known to be lost. ``np.round(NaN).astype(int)`` is undefined
+    (platform dependent) instead of raising, so the point would silently
+    "recover" with finite garbage.
+    """
+    video = pyidi.VideoReader(input_file=DATA)
+    frame = np.asarray(video.get_frame(1))
+
+    method = pyidi.DirectionalLucasKanade(video)
+    method.set_points(POINTS)
+    method.configure(verbose=0, show_pbar=False, processes=1, dij=(1, 0))
+    method.set_rigid_body_motion(None)
+    method.image_size = (video.image_height, video.image_width)
+    method.displacements = np.zeros((len(POINTS), 2, 2))
+    # Simulate a checkpoint restored by resume_temp_files(): one point was
+    # already lost (NaN) in the interrupted run, the rest are fine.
+    method.displacements[1, 0, :] = np.nan
+    method.failed_points = {}              # reset, exactly as a fresh run does
+    method.warnings = []
+    method._interpolate_reference(video)
+    method.set_directions(method.dij)
+
+    rbm_int = np.zeros(2, dtype=int)
+    rbm_res = np.zeros(2)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter('error', RuntimeWarning)
+        warnings.simplefilter('ignore', UserWarning)
+        method._optimize_frame_numpy(frame, 1, 1, rbm_int, rbm_res)
+
+    assert np.isnan(method.displacements[1, 1, :]).all(), 'a checkpoint-NaN point must stay NaN'
+    assert 1 in method.failed_points
+    assert np.isfinite(method.displacements[0, 1, :]).all(), 'the other points must be unaffected'
+    assert np.isfinite(method.displacements[2:, 1, :]).all()
+
+
 def test_numba_is_the_default():
     """``use_compiled_kernel`` defaults to True and is stored as an attribute."""
     video = pyidi.VideoReader(input_file=DATA)
@@ -177,6 +219,18 @@ def test_pad_accepts_a_scalar_and_a_pair():
     """``pad`` is a pair here, but a scalar must not break."""
     video = pyidi.VideoReader(input_file=DATA)
     _assert_same(_run(video, True, pad=2), _run(video, True, pad=(2, 2)))
+
+
+def test_asymmetric_pad_runs_and_matches():
+    """``pad=(pad_y, pad_x)`` with pad_y != pad_x must not raise and must agree.
+
+    Regression test: ``_interpolate_reference`` and ``_warm_up_kernels`` used to
+    pair the padding axes with the wrong grid axis, which made
+    ``RectBivariateSpline`` raise a ``ValueError`` for every point whenever the
+    two pad values differed.
+    """
+    video = pyidi.VideoReader(input_file=DATA)
+    _assert_same(_run(video, False, pad=(1, 3)), _run(video, True, pad=(1, 3)))
 
 
 def test_untrackable_point_becomes_nan_and_warns():
@@ -253,6 +307,38 @@ def test_failed_points_survive_multiprocessing():
 
     assert 3 in method.failed_points
     assert np.isnan(result[3][1:]).all()
+
+
+def test_multiprocessing_warns_about_failed_points():
+    """The parent process must summarise the failure, with global indices.
+
+    ``multi()`` already merges the workers' ``failed_points`` dicts onto global
+    point indices, but ``calculate_displacements`` used to return from the
+    multiprocessing branch before ``_warn_about_failed_points`` ran. Per-point
+    warnings raised inside a worker use worker-local indices and, being raised
+    in a different process, may not even reach the console under
+    forkserver/spawn, so the documented "a warning is issued" contract has to
+    be honoured by the parent.
+    """
+    video = pyidi.VideoReader(input_file=DATA)
+    frames = np.asarray(video.get_frames()).copy()
+    frames[:, 100:140, 100:140] = 50
+    flat = pyidi.VideoReader(input_file=frames, root=video.root)
+
+    # The bad point is last, so a worker reports it under a local index of its own.
+    points = np.array([[31, 35], [31, 215], [95, 71], [120, 120]])
+
+    method = pyidi.DirectionalLucasKanade(flat)
+    method.set_points(points)
+    method.configure(verbose=0, show_pbar=False, processes=2, dij=(1, 0),
+                     use_compiled_kernel=True)
+
+    with pytest.warns(UserWarning, match=fr'1 of {len(points)} points could not be tracked'):
+        result = method.get_displacements(autosave=False)
+
+    assert set(method.failed_points) == {3}
+    assert np.isnan(result[3][1:]).all()
+    assert np.isfinite(result[:3]).all()
 
 
 def test_warm_up_matches_the_real_call_signature():

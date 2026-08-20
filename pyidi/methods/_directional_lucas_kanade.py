@@ -213,9 +213,15 @@ class DirectionalLucasKanade(IDIMethod):
             if not self.resume_analysis:
                 self.create_temp_files(init_multi=True, add_directions_file = True)
             self.displacements = multi(self.video, self, self.processes, self.configuration_keys)
-            
+
             # Clear the temporary files (only once per analysis)
             self.clear_temp_files()
+
+            # multi() merges the workers' failed_points dicts (remapped to global
+            # point indices) into self.failed_points, but per-point warnings raised
+            # inside a worker use worker-local indices and may not even reach the
+            # console under forkserver/spawn. Summarise with the global indices here.
+            self._warn_about_failed_points()
             return
 
         self.image_size = (self.video.image_height, self.video.image_width)
@@ -442,12 +448,27 @@ class DirectionalLucasKanade(IDIMethod):
                 self.displacements[p, ii, :] = np.nan
                 continue
 
+            previous = self.displacements[p, ii-1, :]
+            if not self._displacement_is_sane(previous):
+                # Not caught by the ``failed_points`` check above: a resumed
+                # analysis restores displacements from a checkpoint written by an
+                # interrupted run, and ``failed_points`` itself is not persisted
+                # and is reset above, so a point lost before the checkpoint is no
+                # longer known to be lost. np.round(NaN).astype(int) is undefined
+                # (e.g. INT64_MIN on x86, 0 on arm64), which would otherwise let
+                # the point silently "recover" with finite garbage. Mirrors the
+                # same guard the compiled kernel applies to ``previous`` in
+                # ``_lk_kernels.optimize_frame_directional``.
+                self.displacements[p, ii, :] = np.nan
+                self._record_failed_point(p, i, _lk_kernels.STATUS_DIVERGED)
+                continue
+
             rbm_res_para = np.dot(rbm_res, dij) * dij
             rbm_res_perp = rbm_res - rbm_res_para
 
             # start optimization with previous optimal parameter values
-            d_init = np.round(self.displacements[p, ii-1, :]).astype(int)
-            d_res = self.displacements[p, ii-1, :] - d_init
+            d_init = np.round(previous).astype(int)
+            d_res = previous - d_init
 
             yslice, xslice = self._padded_slice(point + d_init + rbm_int, self.roi_size,
                                                 self.image_size, (1, 1))
@@ -674,8 +695,8 @@ class DirectionalLucasKanade(IDIMethod):
             img_subset = f[yslice, xslice]
 
             spl = RectBivariateSpline(
-               x=np.arange(-pad[1], self.roi_size[0]+pad[1]),
-               y=np.arange(-pad[0], self.roi_size[1]+pad[0]),
+               x=np.arange(-pad[0], self.roi_size[0]+pad[0]),
+               y=np.arange(-pad[1], self.roi_size[1]+pad[1]),
                z=img_subset,
                kx=self.int_order,
                ky=self.int_order,
@@ -913,8 +934,8 @@ def _warm_up_kernels(video: VideoReader, method_kwargs: dict):
             return
 
         # The axes are paired as in ``_interpolate_reference``.
-        grid_y = np.arange(-pad[1], roi_size[0] + pad[1])
-        grid_x = np.arange(-pad[0], roi_size[1] + pad[0])
+        grid_y = np.arange(-pad[0], roi_size[0] + pad[0])
+        grid_x = np.arange(-pad[1], roi_size[1] + pad[1])
         spline = RectBivariateSpline(
             x=grid_y, y=grid_x, z=np.zeros((len(grid_y), len(grid_x))),
             kx=int_order, ky=int_order, s=0

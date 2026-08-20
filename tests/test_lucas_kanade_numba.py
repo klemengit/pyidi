@@ -268,6 +268,44 @@ def test_matches_numpy_for_large_previous_displacements():
         np.testing.assert_allclose(a[finite], b[finite], atol=1e-9, rtol=0)
 
 
+def test_resume_keeps_a_previously_failed_point_nan():
+    """A checkpoint's NaN row must not be cast to int and "recover".
+
+    ``resume_analysis`` restores ``displacements`` from a checkpoint written by
+    an interrupted run (see ``IDIMethod.resume_temp_files``), but
+    ``failed_points`` itself is not persisted and is reset to ``{}`` on every
+    run (see ``calculate_displacements``). Without a guard, a point that was
+    already NaN when the checkpoint was written is no longer known to be lost,
+    and ``np.round(NaN).astype(int)`` is undefined (platform dependent)
+    instead of raising, so the point would silently "recover" with finite
+    garbage.
+    """
+    video = pyidi.VideoReader(input_file=DATA)
+    frame = np.asarray(video.get_frame(1))
+
+    lk = pyidi.LucasKanade(video)
+    lk.set_points(POINTS)
+    lk.configure(verbose=0, show_pbar=False, processes=1)
+    lk.image_size = (video.image_height, video.image_width)
+    lk.displacements = np.zeros((len(POINTS), 2, 2))
+    # Simulate a checkpoint restored by resume_temp_files(): one point was
+    # already lost (NaN) in the interrupted run, the rest are fine.
+    lk.displacements[1, 0, :] = np.nan
+    lk.failed_points = {}                  # reset, exactly as a fresh run does
+    lk.warnings = []
+    lk._interpolate_reference(video)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter('error', RuntimeWarning)
+        warnings.simplefilter('ignore', UserWarning)
+        lk._optimize_frame_numpy(frame, 1, 1)
+
+    assert np.isnan(lk.displacements[1, 1, :]).all(), 'a checkpoint-NaN point must stay NaN'
+    assert 1 in lk.failed_points
+    assert np.isfinite(lk.displacements[0, 1, :]).all(), 'the other points must be unaffected'
+    assert np.isfinite(lk.displacements[2:, 1, :]).all()
+
+
 def test_multiprocessing_matches_single_process():
     """Splitting points across processes gives the same result."""
     video = pyidi.VideoReader(input_file=DATA)
@@ -431,6 +469,35 @@ def test_failed_points_survive_multiprocessing():
         warnings.simplefilter('ignore')
         displacements = lk.get_displacements(autosave=False)
 
+    assert set(lk.failed_points) == {len(POINTS)}
+    nan_rows = set(np.flatnonzero(np.isnan(displacements[:, :, 0]).any(axis=1)))
+    assert nan_rows == {len(POINTS)}
+    assert np.isfinite(displacements[:len(POINTS)]).all()
+
+
+def test_multiprocessing_warns_about_failed_points():
+    """The parent process must summarise the failure, not just record it.
+
+    ``multi()`` already merges the workers' ``failed_points`` dicts onto global
+    point indices, but ``calculate_displacements`` used to return from the
+    multiprocessing branch before ``_warn_about_failed_points`` ran. Per-point
+    warnings raised inside a worker use worker-local indices and, being raised
+    in a different process, may not even reach the console under
+    forkserver/spawn, so the documented "a warning is issued" contract has to
+    be honoured by the parent.
+    """
+    video = pyidi.VideoReader(input_file=DATA)
+    flat = [121, 60]                       # uniform region, cannot be tracked
+    points = np.vstack([POINTS, [flat]])
+
+    lk = pyidi.LucasKanade(video)
+    lk.set_points(points)
+    lk.configure(verbose=0, show_pbar=False, processes=2, use_compiled_kernel=True)
+
+    with pytest.warns(UserWarning, match=fr'1 of {len(points)} points could not be tracked'):
+        displacements = lk.get_displacements(autosave=False)
+
+    # the summary must use the global index, not the worker-local one
     assert set(lk.failed_points) == {len(POINTS)}
     nan_rows = set(np.flatnonzero(np.isnan(displacements[:, :, 0]).any(axis=1)))
     assert nan_rows == {len(POINTS)}

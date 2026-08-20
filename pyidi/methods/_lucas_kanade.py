@@ -178,6 +178,12 @@ class LucasKanade(IDIMethod):
 
             # Clear the temporary files (only once per analysis)
             self.clear_temp_files()
+
+            # multi() merges the workers' failed_points dicts (remapped to global
+            # point indices) into self.failed_points, but per-point warnings raised
+            # inside a worker use worker-local indices and may not even reach the
+            # console under forkserver/spawn. Summarise with the global indices here.
+            self._warn_about_failed_points()
             return
 
         # For a single process
@@ -400,9 +406,24 @@ class LucasKanade(IDIMethod):
                 self.displacements[p, ii, :] = np.nan
                 continue
 
+            previous = self.displacements[p, ii-1, :]
+            if not self._displacement_is_sane(previous):
+                # Not caught by the ``failed_points`` check above: a resumed
+                # analysis restores displacements from a checkpoint written by an
+                # interrupted run, and ``failed_points`` itself is not persisted
+                # and is reset above, so a point lost before the checkpoint is no
+                # longer known to be lost. np.round(NaN).astype(int) is undefined
+                # (e.g. INT64_MIN on x86, 0 on arm64), which would otherwise let
+                # the point silently "recover" with finite garbage. Mirrors the
+                # same guard the compiled kernel applies to ``previous`` in
+                # ``_lk_kernels.optimize_frame``.
+                self.displacements[p, ii, :] = np.nan
+                self._record_failed_point(p, i, _lk_kernels.STATUS_DIVERGED)
+                continue
+
             # start optimization with previous optimal parameter values
-            d_init = np.round(self.displacements[p, ii-1, :]).astype(int)
-            d_res = self.displacements[p, ii-1, :] - d_init
+            d_init = np.round(previous).astype(int)
+            d_res = previous - d_init
 
             yslice, xslice = self._padded_slice(point+d_init, self.roi_size, self.image_size, 1)
             G = frame[yslice, xslice]

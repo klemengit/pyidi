@@ -327,11 +327,16 @@ class GUI:
 
                 vectors_all = np.append(vectors_all, vectors, axis=0)
             
+            if np.all(np.isnan(self.method.displacements)):
+                disp_max = 1.0  # fallback when every point failed to track
+            else:
+                disp_max = np.nanmax(self.method.displacements)
+
             if self.method_name == 'lk':
-                    scale = self.method.roi_size[0]/(2*np.max(self.method.displacements))
+                    scale = self.method.roi_size[0]/(2*disp_max)
 
             elif self.method_name == 'sof':
-                    scale = self.method.subset_size/(2*np.max(self.method.displacements))
+                    scale = self.method.subset_size/(2*disp_max)
             try:
                 viewer.layers.pop('Displacement Field')
             except:
