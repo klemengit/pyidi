@@ -8,7 +8,6 @@ from matplotlib.figure import Figure
 
 from multiprocessing import Pool
 from tqdm import tqdm
-import numba as nb
 
 import logging
 import logging.handlers

@@ -15,15 +15,15 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from tqdm import tqdm
 import pickle
-import numba as nb
 
 from psutil import cpu_count
 from .. import tools
 
 from .idi_method import IDIMethod
+from . import _lk_kernels
+from ._lk_kernels import NUMBA_AVAILABLE, nb
 from ..video_reader import VideoReader
 from ..progress_bar import progress_bar, rich_progress_bar_setup
-import warnings
 
 
 class DirectionalLucasKanade(IDIMethod):
@@ -38,7 +38,7 @@ class DirectionalLucasKanade(IDIMethod):
         self, roi_size=(9, 9), dij = (1,0), pad=(2,2), max_nfev=20, 
         tol=1e-8, int_order=3, verbose=1, show_pbar=True, 
         processes=1, resume_analysis=False, reference_image=0,
-        frame_range='full', use_numba=False
+        frame_range='full', use_compiled_kernel=True
     ):
         """
         Displacement identification based on Directional Lucas-Kanade method,
@@ -77,11 +77,17 @@ class DirectionalLucasKanade(IDIMethod):
         :param frame_range: Part of the video to process. If "full", a full video is processed. If first element of tuple is not 0,
             a appropriate reference image should be chosen.
         :type frame_range: tuple or "full"
-        :param use_numba: Use numba.njit for computation speedup. Currently not implemented.
-        :type use_numba: bool
+        :param use_compiled_kernel: use the compiled (numba) kernel, which fuses the
+            inner optimization loop and parallelizes over points. Results are identical
+            to the pure NumPy path to within floating-point round-off. Falls back to
+            the NumPy path automatically if numba is not installed or if
+            ``int_order != 3``. Defaults to True.
+        :type use_compiled_kernel: bool, optional
         """
         if pad is not None:
-            self.pad = pad
+            # ``pad`` is a (pad_y, pad_x) pair here, unlike LucasKanade where it is a
+            # scalar. Accept a scalar too and broadcast, so both spellings work.
+            self.pad = np.broadcast_to(np.asarray(pad, dtype=int), (2,)).copy()
         if max_nfev is not None:
             self.max_nfev = max_nfev
         if tol is not None:
@@ -104,8 +110,8 @@ class DirectionalLucasKanade(IDIMethod):
             self.reference_image = reference_image
         if frame_range is not None:
             self.frame_range = frame_range
-        if use_numba is not None:
-            self.use_numba = use_numba
+        if use_compiled_kernel is not None:
+            self.use_compiled_kernel = use_compiled_kernel
         if dij is not None:
             self.dij = np.array(dij)
             if np.any(np.linalg.norm(self.dij, axis=-1) != 1):
@@ -207,9 +213,15 @@ class DirectionalLucasKanade(IDIMethod):
             if not self.resume_analysis:
                 self.create_temp_files(init_multi=True, add_directions_file = True)
             self.displacements = multi(self.video, self, self.processes, self.configuration_keys)
-            
+
             # Clear the temporary files (only once per analysis)
             self.clear_temp_files()
+
+            # multi() merges the workers' failed_points dicts (remapped to global
+            # point indices) into self.failed_points, but per-point warnings raised
+            # inside a worker use worker-local indices and may not even reach the
+            # console under forkserver/spawn. Summarise with the global indices here.
+            self._warn_about_failed_points()
             return
 
         self.image_size = (self.video.image_height, self.video.image_width)
@@ -222,6 +234,10 @@ class DirectionalLucasKanade(IDIMethod):
 
         self.warnings = []
 
+        # Points that could no longer be tracked, keyed by point index. They are
+        # NaN in the results from the frame at which they were lost.
+        self.failed_points = {}
+
         # Precomputables
         start_time = time.time()
 
@@ -229,6 +245,11 @@ class DirectionalLucasKanade(IDIMethod):
             t = time.time()
             print(f'Interpolating the reference image...')
         self._interpolate_reference(self.video)
+
+        use_compiled_kernel = self._compiled_kernel_available()
+        if use_compiled_kernel:
+            self._prepare_numba_reference()
+
         if self.verbose:
             print(f'...done in {time.time() - t:.2f} s')
         
@@ -245,27 +266,16 @@ class DirectionalLucasKanade(IDIMethod):
             rbm_int = np.round(rbm).astype(int)
             rbm_res = rbm - rbm_int
 
-            # Iterate over points.
-            for p, (point, dij) in enumerate(zip(self.points, self.dij)):
-                rbm_res_para = np.dot(rbm_res, dij) * dij
-                rbm_res_perp = rbm_res - rbm_res_para
-                
-                # start optimization with previous optimal parameter values
-                d_init = np.round(self.displacements[p, ii-1, :]).astype(int)
-                d_res = self.displacements[p, ii-1, :] - d_init
+            # Read the frame once per time step. Reading it inside the loop over
+            # points re-decodes the same frame for every point, which is free for
+            # memory-mapped formats but costs a full decode per point for video
+            # and image files.
+            frame = np.asarray(self.video.get_frame(i))
 
-                yslice, xslice = self._padded_slice(point+d_init + rbm_int, self.roi_size, self.image_size, (1,1))
-                G = self.video.get_frame(i)[yslice, xslice].astype(np.float64)
-
-                displacement = self.optimize_translations(
-                    G=G, 
-                    F_spline=self.interpolation_splines[p], 
-                    maxiter=self.max_nfev,
-                    tol=self.tol,
-                    dij = dij,
-                    d_subpixel_init = -d_res + rbm_res
-                    )
-                self.displacements[p, ii, :] = displacement + d_init - rbm_res - rbm_res_perp
+            if use_compiled_kernel:
+                self._optimize_frame_numba(frame, ii, i, rbm_int, rbm_res)
+            else:
+                self._optimize_frame_numpy(frame, ii, i, rbm_int, rbm_res)
 
             # temp
             self.temp_disp[:, ii, :] = self.displacements[:, ii, :]
@@ -276,6 +286,8 @@ class DirectionalLucasKanade(IDIMethod):
                 self.progress[self.task_id] = {"progress": ii + 1, "total": len_of_task}
                 
         del self.temp_disp
+
+        self._warn_about_failed_points()
 
         if self.verbose:
             full_time = time.time() - start_time
@@ -290,7 +302,259 @@ class DirectionalLucasKanade(IDIMethod):
             self.clear_temp_files()
 
 
-    def optimize_translations(self, G, F_spline, maxiter, tol, dij, d_subpixel_init=(0, 0)):
+    def _compiled_kernel_available(self):
+        """Decide whether the compiled kernel can be used for this configuration.
+
+        :return: True if the fused numba kernel should be used.
+        :rtype: bool
+        """
+        if not getattr(self, 'use_compiled_kernel', True):
+            return False
+
+        if not NUMBA_AVAILABLE:
+            if not getattr(self, '_numba_warning_issued', False):
+                warnings.warn(
+                    'numba is not installed, so the compiled kernel is unavailable. '
+                    'Falling back to the NumPy implementation, which is a lot slower. '
+                    'Install numba for the fast path.'
+                )
+                self._numba_warning_issued = True
+            return False
+
+        # The kernel implements cubic (de Boor) spline evaluation only.
+        if self.int_order != 3:
+            if not getattr(self, '_int_order_warning_issued', False):
+                warnings.warn(
+                    f'The compiled kernel supports int_order=3 only (got {self.int_order}). '
+                    'Falling back to the NumPy implementation, which is slower. '
+                    'Use int_order=3 for the compiled kernel.'
+                )
+                self._int_order_warning_issued = True
+            return False
+
+        return True
+
+    def _prepare_numba_reference(self):
+        """Convert the reference splines into flat arrays for the compiled kernel.
+
+        Every region of interest has the same shape, so all points share the same
+        knot vectors and only the spline coefficients differ.
+        """
+        splines = self.interpolation_splines
+        tx, ty, _ = splines[0].tck
+
+        self._nb_tx = np.ascontiguousarray(tx, dtype=np.float64)
+        self._nb_ty = np.ascontiguousarray(ty, dtype=np.float64)
+
+        n_cy = len(tx) - self.int_order - 1
+        n_cx = len(ty) - self.int_order - 1
+
+        self._nb_coeffs = np.empty((len(splines), n_cy, n_cx), dtype=np.float64)
+        for p, spline in enumerate(splines):
+            self._nb_coeffs[p] = spline.tck[2].reshape(n_cy, n_cx)
+
+        self._nb_points = np.ascontiguousarray(self.points, dtype=np.int64)
+        self._nb_directions = np.ascontiguousarray(self.dij, dtype=np.float64)
+        self._nb_out = np.empty((len(splines), 2), dtype=np.float64)
+        self._nb_status = np.empty(len(splines), dtype=np.int64)
+        self._nb_clamped = np.empty(len(splines), dtype=np.bool_)
+        self._edge_warning_issued = False
+
+    def _displacement_is_sane(self, displacement):
+        """Check that a displacement is finite and smaller than the image.
+
+        :param displacement: (dy, dx) in pixels
+        :type displacement: array-like of size 2
+        :return: False if the value is non-finite or physically impossible
+        :rtype: bool
+        """
+        return bool(
+            np.all(np.isfinite(displacement))
+            and abs(displacement[0]) <= self.image_size[0]
+            and abs(displacement[1]) <= self.image_size[1]
+        )
+
+    def _record_failed_point(self, p, frame, status):
+        """Record a point that could no longer be tracked.
+
+        The first failure is reported immediately so that long analyses give
+        early feedback; the rest are collected into ``failed_points`` and
+        summarised once the analysis finishes.
+
+        :param p: index of the point
+        :type p: int
+        :param frame: frame number at which the point was lost
+        :type frame: int
+        :param status: one of the ``_lk_kernels.STATUS_*`` constants
+        :type status: int
+        """
+        if p in self.failed_points:
+            return
+
+        self.failed_points[p] = {'frame': frame, 'status': status}
+
+        if len(self.failed_points) == 1:
+            reason = (
+                'the image has no gradient along the search direction (a flat ROI, or '
+                'an edge parallel to the direction)'
+                if status == _lk_kernels.STATUS_SINGULAR else
+                'the optimization ran away (a poorly conditioned ROI, or a search '
+                'direction almost parallel to the only edge in the ROI)'
+            )
+            warnings.warn(
+                f'Point {p} (position {self.points[p]}) could not be tracked past frame '
+                f'{frame}: {reason}. Its displacements are set to NaN from that frame on '
+                f'and the analysis continues. Any further lost points are summarised at '
+                f'the end; see the failed_points attribute.'
+            )
+
+    def _warn_about_failed_points(self):
+        """Summarise the points lost during the analysis."""
+        if not self.failed_points:
+            return
+
+        indices = sorted(self.failed_points)
+        shown = ', '.join(str(p) for p in indices[:10])
+        if len(indices) > 10:
+            shown += f', ... ({len(indices) - 10} more)'
+
+        warnings.warn(
+            f'{len(indices)} of {len(self.points)} points could not be tracked and are '
+            f'NaN from the frame at which they were lost: {shown}. Reposition them onto '
+            f'features with gradient along the search direction, increase roi_size, or '
+            f'check the prescribed directions. Per-point detail is in the failed_points '
+            f'attribute.'
+        )
+
+    def _optimize_frame_numpy(self, frame, ii, i, rbm_int, rbm_res):
+        """Run the reference NumPy optimization for all points of a single frame.
+
+        :param frame: the current frame
+        :type frame: ndarray
+        :param ii: index into the displacement array
+        :type ii: int
+        :param i: frame number in the video (for error messages)
+        :type i: int
+        :param rbm_int: integer part of the prescribed rigid-body motion
+        :type rbm_int: ndarray of size 2
+        :param rbm_res: sub-pixel remainder of the prescribed rigid-body motion
+        :type rbm_res: ndarray of size 2
+        """
+        # Iterate over points.
+        for p, (point, dij) in enumerate(zip(self.points, self.dij)):
+
+            if p in self.failed_points:
+                # Already lost at an earlier time step.
+                self.displacements[p, ii, :] = np.nan
+                continue
+
+            previous = self.displacements[p, ii-1, :]
+            if not self._displacement_is_sane(previous):
+                # Not caught by the ``failed_points`` check above: a resumed
+                # analysis restores displacements from a checkpoint written by an
+                # interrupted run, and ``failed_points`` itself is not persisted
+                # and is reset above, so a point lost before the checkpoint is no
+                # longer known to be lost. np.round(NaN).astype(int) is undefined
+                # (e.g. INT64_MIN on x86, 0 on arm64), which would otherwise let
+                # the point silently "recover" with finite garbage. Mirrors the
+                # same guard the compiled kernel applies to ``previous`` in
+                # ``_lk_kernels.optimize_frame_directional``.
+                self.displacements[p, ii, :] = np.nan
+                self._record_failed_point(p, i, _lk_kernels.STATUS_DIVERGED)
+                continue
+
+            rbm_res_para = np.dot(rbm_res, dij) * dij
+            rbm_res_perp = rbm_res - rbm_res_para
+
+            # start optimization with previous optimal parameter values
+            d_init = np.round(previous).astype(int)
+            d_res = previous - d_init
+
+            yslice, xslice = self._padded_slice(point + d_init + rbm_int, self.roi_size,
+                                                self.image_size, (1, 1))
+            G = frame[yslice, xslice].astype(np.float64)
+
+            try:
+                displacement = self.optimize_translations(
+                    G=G,
+                    F_spline=self.interpolation_splines[p],
+                    maxiter=self.max_nfev,
+                    tol=self.tol,
+                    dij=dij,
+                    d_subpixel_init=-d_res + rbm_res,
+                    point_index=p,
+                    frame=i
+                )
+            except ValueError:
+                self.displacements[p, ii, :] = np.nan
+                self._record_failed_point(p, i, _lk_kernels.STATUS_SINGULAR)
+                continue
+
+            result = displacement + d_init - rbm_res - rbm_res_perp
+            if self._displacement_is_sane(result):
+                self.displacements[p, ii, :] = result
+            else:
+                # The iteration ran away without the projected gradient ever
+                # vanishing. Left alone this returns silent nonsense.
+                self.displacements[p, ii, :] = np.nan
+                self._record_failed_point(p, i, _lk_kernels.STATUS_DIVERGED)
+
+    def _optimize_frame_numba(self, frame, ii, i, rbm_int, rbm_res):
+        """Run the compiled kernel for all points of a single frame.
+
+        :param frame: the current frame
+        :type frame: ndarray
+        :param ii: index into the displacement array
+        :type ii: int
+        :param i: frame number in the video (for error messages)
+        :type i: int
+        :param rbm_int: integer part of the prescribed rigid-body motion
+        :type rbm_int: ndarray of size 2
+        :param rbm_res: sub-pixel remainder of the prescribed rigid-body motion
+        :type rbm_res: ndarray of size 2
+        """
+        _lk_kernels.optimize_frame_directional(
+            frame,
+            self._nb_points,
+            self._nb_directions,
+            self._nb_tx,
+            self._nb_ty,
+            self._nb_coeffs,
+            self.displacements[:, ii-1, :],
+            self._nb_out,
+            self._nb_status,
+            self._nb_clamped,
+            int(self.roi_size[0]),
+            int(self.roi_size[1]),
+            1,
+            1,
+            self.max_nfev,
+            self.tol,
+            int(rbm_int[0]),
+            int(rbm_int[1]),
+            float(rbm_res[0]),
+            float(rbm_res[1]),
+        )
+
+        if not self._edge_warning_issued and self._nb_clamped.any():
+            warnings.warn('Reached image edge. The displacement optimization ' +
+                'algorithm may not converge, or selected points might be too close ' +
+                'to image border. Please check analysis settings.')
+            self._edge_warning_issued = True
+
+        self.displacements[:, ii, :] = self._nb_out
+
+        # A point that fails is lost from this time step onwards. Mark it NaN and
+        # carry on with the rest: in a several-hundred-point analysis a handful of
+        # badly placed points should not throw away every good one.
+        failed = self._nb_status != _lk_kernels.STATUS_OK
+        if failed.any():
+            self.displacements[failed, ii, :] = np.nan
+            for p in np.flatnonzero(failed):
+                self._record_failed_point(int(p), i, int(self._nb_status[p]))
+
+    def optimize_translations(self, G, F_spline, maxiter, tol, dij, d_subpixel_init=(0, 0),
+                              point_index=None, frame=None):
         """
         Determine the optimal translation parameters to align the current
         image subset `G` with the interpolated reference image subset `F`.
@@ -306,6 +570,10 @@ class DirectionalLucasKanade(IDIMethod):
         :param d_subpixel_init: initial subpixel displacement guess, 
             relative to the integrer position of the image subset `G`
         :type d_init: array-like of size 2, optional, defaults to (0, 0)
+        :param point_index: index of the point being processed (for error messages)
+        :type point_index: int, optional
+        :param frame: frame number being processed (for error messages)
+        :type frame: int, optional
         :return: the obtimal subpixel translation parameters of the current
             image, relative to the position of input subset `G`.
         :rtype: array of size 2
@@ -314,10 +582,17 @@ class DirectionalLucasKanade(IDIMethod):
         Gd      = Gx*dij[1] + Gy*dij[0]
         Gd2     = np.sum(Gd**2)
         if Gd2 == 0:
-            warnings.warn('Division by zero encountered in optimize_translations.')
-            Gd2_inv = 0
-        else: 
-            Gd2_inv = 1/Gd2
+            point_info = f"index {point_index}" if point_index is not None else "unknown"
+            if point_index is not None and hasattr(self, 'points'):
+                point_info += f" (position {self.points[point_index]})"
+            frame_info = f"frame {frame}" if frame is not None else "unknown frame"
+            raise ValueError(
+                f"Degenerate ROI at point {point_info}, {frame_info}. "
+                f"The image has no gradient along the search direction {np.asarray(dij)} "
+                f"(a flat region, or an edge parallel to the direction). "
+                f"Reposition this point, or check the prescribed direction."
+            )
+        Gd2_inv = 1/Gd2
         G_clipped = G[1:-1, 1:-1]
 
         # initialize values
@@ -334,7 +609,7 @@ class DirectionalLucasKanade(IDIMethod):
             x_f += delta[1]
 
             F = F_spline(y_f, x_f)
-            delta, error = compute_delta_numba(F, G_clipped, Gd, Gd2_inv, dij = dij)
+            delta, error = compute_delta(F, G_clipped, Gd, Gd2_inv, dij)
 
             displacement += delta
             if error < tol:
@@ -420,8 +695,8 @@ class DirectionalLucasKanade(IDIMethod):
             img_subset = f[yslice, xslice]
 
             spl = RectBivariateSpline(
-               x=np.arange(-pad[1], self.roi_size[0]+pad[1]),
-               y=np.arange(-pad[0], self.roi_size[1]+pad[0]),
+               x=np.arange(-pad[0], self.roi_size[0]+pad[0]),
+               y=np.arange(-pad[1], self.roi_size[1]+pad[1]),
                z=img_subset,
                kx=self.int_order,
                ky=self.int_order,
@@ -531,6 +806,11 @@ def multi(video: VideoReader, idi_method: DirectionalLucasKanade, processes, con
     from rich import progress
     import multiprocessing
 
+    # Where forking is unsafe this returns a context that does not fork.
+    mp_context = _lk_kernels.worker_process_context()
+    if mp_context is None:
+        _lk_kernels.warn_if_fork_unsafe()
+
     if processes < 0:
         processes = cpu_count() + processes
     elif processes == 0:
@@ -555,18 +835,22 @@ def multi(video: VideoReader, idi_method: DirectionalLucasKanade, processes, con
     exclude_keys = ["processes"]
     method_kwargs = dict([(k, idi_method.__dict__.get(k, None)) for k in configuration_keys if k not in exclude_keys])
 
+    # Compile once here rather than once per worker.
+    _warm_up_kernels(video, method_kwargs)
+
     print(f'Computation start: {datetime.datetime.now()}')
 
     t_start = time.time()
 
     with rich_progress_bar_setup() as progress:
         futures = []
-        with multiprocessing.Manager() as manager:
+        with (mp_context or multiprocessing).Manager() as manager:
             # this is the key - we share some state between our 
             # main process and our worker functions
             _progress = manager.dict()
 
-            with ProcessPoolExecutor(max_workers=processes) as executor:
+            with ProcessPoolExecutor(max_workers=processes,
+                                     mp_context=mp_context) as executor:
                 for n in range(0, len(points_split)):  # iterate over the jobs we need to run
                     # set visible false so we don't have a lot of bars all at once:
                     task_id = progress.add_task(f"task {n} ({len(points_split[n])} points)")
@@ -585,6 +869,16 @@ def multi(video: VideoReader, idi_method: DirectionalLucasKanade, processes, con
                     out.append(future.result())
 
                 out1 = sorted(out, key=lambda x: x[1])
+
+                # Each worker numbers its points from zero, so shift them back
+                # onto the full point list before merging.
+                idi_method.failed_points = {}
+                offset = 0
+                for result in out1:
+                    for local, detail in result[2].items():
+                        idi_method.failed_points[offset + local] = detail
+                    offset += len(result[0])
+
                 out1 = np.concatenate([d[0] for d in out1])
 
     t = time.time() - t_start
@@ -597,24 +891,164 @@ def multi(video: VideoReader, idi_method: DirectionalLucasKanade, processes, con
     return out1
 
 
+def _warm_up_kernels(video: VideoReader, method_kwargs: dict):
+    """Compile the numba kernels once, in the parent process, before forking.
+
+    Without this every worker compiles the same kernel independently on a cold
+    cache. It also avoids several processes writing the same cache entry at the
+    same time, which is a long-standing open numba bug (numba issue #4807,
+    "Cache causes Segmentation Faults when generated in parallel").
+
+    Where the start method is ``fork`` the workers inherit the compiled code
+    directly; where it is ``spawn`` they load it from the on-disk cache the
+    parent has just written. Either way it is compiled once instead of N times.
+
+    This is only an optimization: if anything here fails the workers simply
+    compile the kernels themselves, so all errors are swallowed.
+
+    :param video: the video, used to match the frame dtype the workers will see
+    :type video: VideoReader
+    :param method_kwargs: the configuration passed on to the workers
+    :type method_kwargs: dict
+    """
+    try:
+        roi_size = np.array(method_kwargs.get('roi_size', (9, 9)), dtype=int)
+        pad = np.broadcast_to(
+            np.asarray(method_kwargs.get('pad', (2, 2)), dtype=int), (2,))
+        int_order = int(method_kwargs.get('int_order', 3))
+        tol = float(method_kwargs.get('tol', 1e-8))
+        use_compiled = method_kwargs.get('use_compiled_kernel', True) and NUMBA_AVAILABLE
+
+        # The compiled code is specialized on the dtype of the frames, so warm
+        # it with a real frame rather than a synthetic one.
+        frame = np.asarray(video.get_frame(0))
+
+        if not use_compiled or int_order != 3:
+            # The NumPy path still goes through a compiled helper. Mirror the
+            # array layouts of the real call so the same specialization is hit.
+            subset = frame[:roi_size[0] + 2, :roi_size[1] + 2].astype(np.float64)
+            Gx, Gy = tools.get_gradient(subset)
+            Gd = Gx * 0.0 + Gy * 1.0
+            compute_delta(np.zeros(Gd.shape), subset[1:-1, 1:-1], Gd, 1.0,
+                          np.array([1.0, 0.0]))
+            return
+
+        # The axes are paired as in ``_interpolate_reference``.
+        grid_y = np.arange(-pad[0], roi_size[0] + pad[0])
+        grid_x = np.arange(-pad[1], roi_size[1] + pad[1])
+        spline = RectBivariateSpline(
+            x=grid_y, y=grid_x, z=np.zeros((len(grid_y), len(grid_x))),
+            kx=int_order, ky=int_order, s=0
+        )
+        tx, ty, coeffs = spline.tck
+        n_cy = len(tx) - int_order - 1
+        n_cx = len(ty) - int_order - 1
+
+        centre = [frame.shape[0] // 2, frame.shape[1] // 2]
+        # Two points, not one: in the real loop ``previous`` is a slice of the 3D
+        # displacement array and is therefore non-contiguous, but with a single
+        # point that slice is still contiguous and numba would compile a
+        # different, unused specialization.
+        points = np.array([centre, centre], dtype=np.int64)
+        previous = np.zeros((2, 2, 2))
+
+        _lk_kernels.optimize_frame_directional(
+            frame,
+            points,
+            np.array([[1.0, 0.0], [1.0, 0.0]]),
+            np.ascontiguousarray(tx, dtype=np.float64),
+            np.ascontiguousarray(ty, dtype=np.float64),
+            np.ascontiguousarray(np.repeat(coeffs.reshape(1, n_cy, n_cx), 2, axis=0),
+                                 dtype=np.float64),
+            previous[:, 0, :],
+            np.zeros((2, 2)),
+            np.zeros(2, dtype=np.int64),
+            np.zeros(2, dtype=np.bool_),
+            int(roi_size[0]),
+            int(roi_size[1]),
+            1,
+            1,
+            1,
+            tol,
+            0,
+            0,
+            0.0,
+            0.0,
+        )
+    except Exception:
+        # Warming the cache is an optimization, never a requirement.
+        pass
+
+
 def worker(points, directions, idi_kwargs, method_kwargs, i, progress, task_id):
     """
     A function that is called when for each job in multiprocessing.
     """
     method_kwargs['show_pbar'] = False # use the rich progress bar insted of tqdm
-    
+
+    # Each worker gets a single numba thread. Without this, every process would
+    # start a full thread pool of its own and the processes would oversubscribe
+    # the CPU, which is slower than either form of parallelism on its own.
+    if NUMBA_AVAILABLE:
+        _lk_kernels.nb.set_num_threads(1)
+
     video = VideoReader(**idi_kwargs)
     idi = DirectionalLucasKanade(video)
     idi.configure(**method_kwargs)
     idi.configure_multiprocessing(i+1, progress, task_id) # configure the multiprocessing settings
     idi.set_points(points)
     idi.set_directions(directions)
-    return idi.get_displacements(autosave=False), i
+    displacements = idi.get_displacements(autosave=False)
+
+    # The point indices are local to this worker; the parent maps them back.
+    return displacements, i, getattr(idi, 'failed_points', {})
 
 
-# @nb.njit
-def compute_delta_numba(F, G, Gd, Gd2_inv, dij):
-    F_G = G - F
-    error = np.sum(Gd*F_G)*Gd2_inv
-    delta = dij*error
-    return delta, error**2
+# The helper below exists in a compiled and a NumPy flavour. An explicit loop is
+# much faster once numba compiles it, but much slower than vectorised NumPy when
+# numba is not installed, so the right one is bound at import time.
+
+
+def _delta_loops(F, G, Gd, Gd2_inv, dij):
+    """
+    Directional least-squares update, with explicit loops.
+
+    :param F: the interpolated reference subset at the current estimate
+    :type F: ndarray of shape (h, w)
+    :param G: the current image subset, without its gradient border
+    :type G: ndarray of shape (h, w)
+    :param Gd: the image gradient projected onto the search direction
+    :type Gd: ndarray of shape (h, w)
+    :param Gd2_inv: reciprocal of the sum of squares of ``Gd``
+    :type Gd2_inv: float
+    :param dij: the unit search direction
+    :type dij: ndarray of size 2
+    :return: the (dy, dx) update and the squared scalar residual
+    :rtype: tuple of (ndarray of size 2, float)
+    """
+    total = 0.0
+    for i in range(G.shape[0]):
+        for j in range(G.shape[1]):
+            total += Gd[i, j] * (G[i, j] - F[i, j])
+    error = total * Gd2_inv
+    return dij * error, error**2
+
+
+def _delta_vectorised(F, G, Gd, Gd2_inv, dij):
+    """
+    Directional least-squares update, vectorised.
+
+    Same result as :func:`_delta_loops`; see there for the parameters.
+    """
+    error = np.sum(Gd * (G - F)) * Gd2_inv
+    return dij * error, error**2
+
+
+if NUMBA_AVAILABLE:
+    compute_delta = nb.njit(cache=True)(_delta_loops)
+else:                                    # pragma: no cover - environment dependent
+    compute_delta = _delta_vectorised
+
+# Backwards-compatible alias: this helper has been importable under this name
+# since before it was actually compiled.
+compute_delta_numba = compute_delta
