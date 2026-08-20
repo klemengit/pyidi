@@ -492,7 +492,9 @@ class VideoReader:
             self.image_width = image_prop.shape[2]
             self.image_height = image_prop.shape[1]
             if not getattr(self, "fps", False):
-                self.configure(fps=image_meta.get("fps", None))
+                fps = image_meta.get("fps")
+                if fps:  # Not all multi-image files carry the fps metadata
+                    self.configure(fps=fps)
 
     def _initialise_video_files(self, input_file):
         """Initialise reader state for video containers handled by ``pyav``.
