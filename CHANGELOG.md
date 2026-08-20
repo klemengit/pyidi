@@ -5,6 +5,90 @@ This changelog starts at version 1.4.0. For earlier versions see the
 
 ## Unreleased
 
+### Eulerian video magnification
+
+New `EulerianMagnifier` class in `pyidi.postprocessing` (also available as a
+functional `eulerian_magnification()` wrapper) adds linear Eulerian Video
+Magnification (Wu et al., SIGGRAPH 2012) as a pre-test visualization tool: a
+Laplacian pyramid decomposition, a temporal band-pass filter applied per
+pyramid level, and linear amplification of the band-passed signal added back
+onto the original. It reveals subtle, often sub-pixel motion directly in the
+raw recording, before any displacement identification is run, so it is useful
+for checking whether (and where) a structure is moving and for picking
+regions of interest or seed points ahead of a full analysis. **This is
+qualitative visualization only, not a measurement** - the amplification
+distorts motion amplitudes non-linearly and must not be read as displacement.
+
+Configure with `freq_band=(low, high)` in Hz to isolate a suspected mode,
+`amplification` for the gain, and `levels` for the pyramid depth. The
+temporal filter is `filter_type="ideal"` (FFT brick-wall, default) or
+`"butter"` (Butterworth). An optional 2D `mask` restricts amplification to a
+region of interest, leaving the rest of the frame as recorded. `save()`
+writes the result to mp4/avi/mov/gif, mapping the intensity range to 8-bit
+for playback.
+
+The optional `lambda_c` spatial-wavelength attenuation, meant to damp
+amplification of fine, noisy detail while leaving broad structural motion at
+full gain, initially ramped in the wrong direction: the finest pyramid level
+got the strongest amplification and the coarsest the weakest, the reverse of
+what Wu et al. specify. This is now fixed to ramp from the coarsest band down
+to the finest. A warning is also now raised if `lambda_c` ends up attenuating
+every level to zero (the output would then equal the input unchanged), and
+`save()` raises rather than silently defaulting to 30 fps when no frame rate
+is available. The test suite was substantially hardened alongside these
+fixes, including mutation-verified tests that would have caught a disabled
+band-pass, a sign-inverted amplification, or a dropped pyramid band.
+
+### Rigid body motion in `DirectionalLucasKanade`
+
+`DirectionalLucasKanade` gained `set_rigid_body_motion(rbm_ij)`: a per-frame
+`(n_time_points, 2)` array giving a known, prescribed rigid-body translation.
+The tracking window for every point now follows this prescribed motion, and
+the motion is subtracted back out of the result, so `self.displacements`
+reports the local motion relative to the rigid body motion rather than each
+point's absolute pixel position. Only the component of the rigid body motion
+aligned with each point's tracking direction (`dij`) is currently supported.
+If `set_rigid_body_motion` is never called, it defaults to zero and existing
+analyses are unaffected.
+
+The same change also fixes the NumPy-path convergence check: `compute_delta`
+(aliased as `compute_delta_numba`) returned a signed error, but the
+optimizer's stopping test (`error < tol`) assumes a non-negative error, so
+iterations could stop early on a spuriously negative error or fail to
+converge. The error is now returned as its absolute value.
+
+### Fixed
+
+- **Asymmetric `pad` in `DirectionalLucasKanade` crashed every point.**
+  `_interpolate_reference` and `_warm_up_kernels` paired the `(pad_y, pad_x)`
+  axes in the opposite order to `_padded_slice`, so a non-square `pad` (e.g.
+  `configure(pad=(2, 5))`) built the reference spline over a grid of the
+  wrong shape. All three now use the same axis pairing.
+- **A point already lost before a checkpoint could come back with garbage
+  displacements after resuming.** `failed_points` is rebuilt from scratch on
+  resume and is not itself checkpointed, so a resumed analysis had no record
+  that a point was already `NaN`. `np.round(NaN).astype(int)` is undefined
+  (e.g. `INT64_MIN` on x86, `0` on arm64) rather than raising, so such a point
+  could silently restart tracking from a finite but meaningless position.
+  `LucasKanade` and `DirectionalLucasKanade` now check the previous
+  displacement for NaN/inf before rounding it and keep the point marked
+  failed if so, matching what the compiled kernel already did.
+- **A single untracked point (`NaN`) could break the displacement-vector
+  display.** The napari `GUI` and the Qt `result_viewer` scaled vectors by
+  `np.max`/`np.max(np.abs(...))`, both of which propagate to `NaN` if any
+  point in the result failed to track. They now use `np.nanmax`, with a
+  fallback when every point failed.
+- With `processes` greater than one, warnings about failed points raised
+  inside a worker used worker-local point indices and, under the
+  `forkserver`/`spawn` start methods, might not reach the console at all. The
+  parent process now re-summarises failed points with global indices once
+  the worker results are merged, for both `LucasKanade` and
+  `DirectionalLucasKanade`.
+- **`compute_inverse_numba` and `compute_delta_numba` are importable from
+  `LucasKanade` again.** The 1.4.0 numba rewrite renamed them to
+  `compute_inverse` and `compute_delta`; code importing the 1.3.3 names broke
+  as soon as it hit that import. Both old names are restored as aliases.
+
 ### Point selection consolidated on `SelectionGUI`
 
 pyidi had accumulated five separate point-selection implementations. Three were
