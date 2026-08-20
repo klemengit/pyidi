@@ -118,9 +118,7 @@ the extracted array:
 
     sof.set_points(gui)          # or: sof.set_points(points)
 
-.. note::
-
-    The screenshot below predates the current ``SelectionGUI`` interface (it
-    shows the old tkinter-based selection UI) and needs to be recaptured.
-
 .. image:: selection.gif
+    :alt: Animated demo of the SelectionGUI Grid method: a polygon is drawn
+        vertex by vertex over the video frame, filling in with the subset
+        grid it encloses.
