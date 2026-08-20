@@ -31,11 +31,19 @@ A ``SelectionGUI`` window can then be opened:
 
     gui = SelectionGUI(video, subset_size=11, subset_overlap=0)
 
-where ``subset_size`` is the side length (in pixels) of the square
+where ``subset_size`` is the side length (in pixels) of the
 Region-Of-Interest/subset drawn around each point, and ``subset_overlap``
 sets the spacing between neighbouring subsets (the step between subset
 centers is ``subset_size + subset_overlap``, so a positive value spreads the
 subsets further apart and a negative value overlaps them).
+
+``subset_size`` can be a single int for a square subset, or a ``(height,
+width)`` pair for an anisotropic one -- the same ``(vertical, horizontal)``
+convention as ``LucasKanade.configure(roi_size=(vertical, horizontal))``. In
+the UI, the ``Subset Configuration`` group has a ``Square subsets`` checkbox
+(checked by default) alongside the height/width spinboxes and sliders: while
+checked, the width tracks the height and only one size can be set; unchecking
+it frees the width spinbox/slider to be set independently.
 
 Selection mode
 --------------

@@ -17,10 +17,62 @@ also differ in boundary handling: ``get_roi_grid`` steps with
 include it. They are therefore *not* axis-swapped versions of each other and
 can return structurally different grids for the same geometry. Preserve this
 when editing -- ``tests/test_selection_geometry.py`` pins it deliberately.
+
+All four functions accept an anisotropic ``subset_size``/``roi_size``, i.e. a
+``(height, width)`` pair instead of a single scalar. ``get_roi_grid`` already
+had this (``roi_size=(roi_size_y, roi_size_x)``) and its signature is
+unchanged here. ``points_along_polygon``, ``rois_inside_polygon`` and
+``rois_inside_mask`` now normalize a scalar or a ``(height, width)`` pair
+through the private ``_as_size_pair`` helper; a scalar still produces
+byte-identical output to before.
 """
 
 import numpy as np
 from matplotlib.path import Path
+
+
+def _as_size_pair(subset_size):
+    """Normalize a scalar or (height, width) subset size to a (h, w) pair.
+
+    Integrality is preserved rather than always casting to float: if
+    ``subset_size`` is a scalar integer, or a pair of integers, ``h`` and
+    ``w`` are returned as Python ``int``; otherwise (any float involved)
+    they are returned as ``float``. This matters downstream --
+    ``IDIMethod.set_points()`` treats non-integer point coordinates as
+    sub-pixel and warns about them, and GUI callers always pass integer
+    sizes (``QSpinBox`` values), so they must keep getting integer grid
+    coordinates out, not a spurious sub-pixel warning on every selection.
+
+    Parameters
+    ----------
+    subset_size : int, float, or a length-2 sequence of int/float
+        A scalar (broadcast to both axes) or a ``(height, width)`` pair,
+        i.e. ``(y_extent, x_extent)``. May be a plain Python number or a
+        0-d/1-d numpy array or scalar.
+
+    Returns
+    -------
+    tuple of int or tuple of float
+        ``(h, w)``, as ``int`` if ``subset_size`` was integral, ``float``
+        otherwise.
+
+    Raises
+    ------
+    ValueError
+        If ``subset_size`` is a sequence whose length is not 2.
+    """
+    arr = np.asarray(subset_size)
+
+    if arr.ndim != 0 and arr.shape != (2,):
+        raise ValueError(f'subset_size must be a scalar or a (height, width) pair, got shape {arr.shape}.')
+
+    cast = int if np.issubdtype(arr.dtype, np.integer) else float
+
+    if arr.ndim == 0:
+        s = cast(arr)
+        return s, s
+
+    return cast(arr[0]), cast(arr[1])
 
 
 def get_roi_grid(polygon_points, roi_size, noverlap, deselect_polygon):
@@ -102,12 +154,18 @@ def points_along_polygon(polygon, subset_size, spacing=0):
     polygon : sequence of (x, y)
         Vertices of an open polyline; points are generated along each
         consecutive segment ``polygon[i] -> polygon[i + 1]``.
-    subset_size : float
-        Size of the subset/ROI; combined with ``spacing`` this sets the
-        step between consecutive points along each segment.
+    subset_size : float or (height, width)
+        Size of the subset/ROI, as a scalar or a ``(height, width)`` pair
+        (``height`` is the vertical/y extent, ``width`` the
+        horizontal/x extent). Combined with ``spacing``, this sets the
+        step between consecutive points along each segment: the step is
+        the extent of the subset projected along the segment's direction
+        (see implementation note below), which reduces to
+        ``subset_size + spacing`` for a square/scalar subset, regardless
+        of the segment's angle.
     spacing : float, optional
-        Extra spacing added to ``subset_size`` to get the step between
-        points. Default is 0.
+        Extra spacing added to the projected subset extent to get the
+        step between points. Default is 0.
 
     Returns
     -------
@@ -119,9 +177,7 @@ def points_along_polygon(polygon, subset_size, spacing=0):
     if len(polygon) < 2:
         return []
 
-    step = subset_size + spacing
-    if step <= 0:
-        step = 1
+    h, w = _as_size_pair(subset_size)
 
     result_points = []
 
@@ -135,6 +191,19 @@ def points_along_polygon(polygon, subset_size, spacing=0):
             continue
 
         direction = segment / length
+
+        # Step = the elliptical extent of the (h, w) subset projected along
+        # the unit segment direction (dx, dy). For h == w == s this is
+        # s * sqrt(dx**2 + dy**2) == s for every angle (dx, dy is a unit
+        # vector), i.e. exactly the old isotropic behaviour -- do not
+        # "simplify" this to |dx|*w + |dy|*h, which is NOT equivalent (it
+        # gives 1.414*s on a 45-degree segment instead of s).
+        dx, dy = direction[0], direction[1]
+        extent = np.sqrt((dx * w) ** 2 + (dy * h) ** 2)
+        step = extent + spacing
+        if step <= 0:
+            step = 1
+
         n_points = int(length // step)
 
         for j in range(n_points + 1):
@@ -155,9 +224,11 @@ def rois_inside_polygon(polygon, subset_size, spacing):
     ----------
     polygon : sequence of (x, y)
         Vertices of a closed polygon. Must contain at least 3 points.
-    subset_size : float
-        Size of the subset/ROI; combined with ``spacing`` this sets the
-        grid step along both x and y.
+    subset_size : float or (height, width)
+        Size of the subset/ROI, as a scalar or a ``(height, width)`` pair
+        (``height`` is the vertical/y extent, ``width`` the
+        horizontal/x extent). Combined with ``spacing`` this sets the
+        grid step along x (from ``width``) and y (from ``height``).
     spacing : float
         Extra spacing added to ``subset_size`` to get the grid step.
 
@@ -170,15 +241,20 @@ def rois_inside_polygon(polygon, subset_size, spacing):
     if len(polygon) < 3:
         return []
 
+    h, w = _as_size_pair(subset_size)
+
     polygon = np.array(polygon)
     min_x, max_x = int(np.floor(np.min(polygon[:, 0]))), int(np.ceil(np.max(polygon[:, 0])))
     min_y, max_y = int(np.floor(np.min(polygon[:, 1]))), int(np.ceil(np.max(polygon[:, 1])))
 
-    step = subset_size + spacing
-    if step <= 0:
-        step = 1  # minimum step to avoid infinite loop
-    xs = np.arange(min_x, max_x+1, step)
-    ys = np.arange(min_y, max_y+1, step)
+    step_x = w + spacing
+    if step_x <= 0:
+        step_x = 1  # minimum step to avoid infinite loop
+    step_y = h + spacing
+    if step_y <= 0:
+        step_y = 1  # minimum step to avoid infinite loop
+    xs = np.arange(min_x, max_x+1, step_x)
+    ys = np.arange(min_y, max_y+1, step_y)
 
     grid_x, grid_y = np.meshgrid(xs, ys)
     points = np.vstack([grid_x.ravel(), grid_y.ravel()]).T
@@ -199,9 +275,11 @@ def rois_inside_mask(mask, subset_size, spacing):
     ----------
     mask : numpy.ndarray
         2D boolean array of shape ``(h, w)``, indexed as ``mask[y, x]``.
-    subset_size : float
-        Size of the subset/ROI; combined with ``spacing`` this sets the
-        grid step along both axes.
+    subset_size : float or (height, width)
+        Size of the subset/ROI, as a scalar or a ``(height, width)`` pair
+        (``height`` is the vertical/y extent, ``width`` the
+        horizontal/x extent). Combined with ``spacing`` this sets the
+        grid step along y (from ``height``) and x (from ``width``).
     spacing : float
         Extra spacing added to ``subset_size`` to get the grid step.
 
@@ -210,13 +288,26 @@ def rois_inside_mask(mask, subset_size, spacing):
     list of tuple
         ``(y, x)`` grid points for which ``mask`` is True.
     """
-    step = subset_size + spacing
-    if step <= 0:
-        step = 1
+    size_h, size_w = _as_size_pair(subset_size)
+
+    step_x = size_w + spacing
+    if step_x <= 0:
+        step_x = 1
+    step_y = size_h + spacing
+    if step_y <= 0:
+        step_y = 1
 
     h, w = mask.shape
-    xs = np.arange(0, w, step)
-    ys = np.arange(0, h, step)
+    # Defensive cast to int: these are pixel indices used directly to index
+    # `mask` below. For integer subset_size/spacing (the normal case --
+    # _as_size_pair now preserves integrality) step_x/step_y and thus xs/ys
+    # are already int, so this is a no-op. But subset_size may legitimately
+    # be a float per the docstring above, in which case np.arange yields a
+    # float array that mask[...] cannot be indexed with -- cast defensively
+    # so a float subset_size degrades to truncated pixel indices instead of
+    # crashing.
+    xs = np.arange(0, w, step_x).astype(int)
+    ys = np.arange(0, h, step_y).astype(int)
     grid_x, grid_y = np.meshgrid(xs, ys)
 
     candidate_points = np.vstack([grid_y.ravel(), grid_x.ravel()]).T  # (y, x)

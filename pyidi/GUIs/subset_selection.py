@@ -5,7 +5,7 @@ from pyqtgraph import GraphicsLayoutWidget, ImageItem, ScatterPlotItem
 import pyqtgraph as pg
 # import pyidi  # Assuming pyidi is a custom module for video handling
 
-from ..selection_geometry import points_along_polygon, rois_inside_polygon, rois_inside_mask
+from ..selection_geometry import points_along_polygon, rois_inside_polygon, rois_inside_mask, _as_size_pair
 
 #: Grab radius (in screen pixels) within which a click/drag is considered to hit an
 #: existing grid/polyline vertex. Kept constant in screen space so hit-testing feels
@@ -214,15 +214,23 @@ class SelectionGUI(QtWidgets.QMainWindow):
             The video to be analyzed. If a VideoReader object, it should be initialized with the video file.
             If a np.ndarray, it can be either a single 2-D image (height, width) or a 3-D frame stack
             (n_frames, height, width), in which case the first frame is displayed.
-        subset_size : int, optional
-            Initial side length (in pixels) of the square subset drawn around each selected point.
-            Sets the starting value of the "Subset size" spinbox/slider used when computing ROI
-            rectangles, grid/line spacing and automatic feature filtering. Defaults to 11.
+        subset_size : int or (height, width) tuple, optional
+            Initial side length (in pixels) of the subset drawn around each selected point. Either a
+            single int for a square subset, or a ``(height, width)`` pair for an anisotropic one, where
+            ``height`` is the vertical/row extent and ``width`` the horizontal/column extent -- the same
+            convention as ``LucasKanade.configure(roi_size=(vertical, horizontal))``, so a value that
+            works for one works for the other. Sets the starting values of the "Subset size" spinboxes/
+            sliders used when computing ROI rectangles, grid/line spacing and automatic feature
+            filtering. Defaults to 11. Normalized and stored as ``self.subset_size``, a ``(height,
+            width)`` tuple of ints. The "Square subsets" checkbox starts checked if ``height ==
+            width`` (so the width spinbox mirrors the height one) and unchecked otherwise.
         subset_overlap : int, optional
             Initial spacing (in pixels) between neighbouring subsets, used as the "Distance between
             subsets" spinbox/slider value for the Grid, Along the line and Brush selection methods.
-            A positive value adds a gap between subsets, a negative value makes them overlap.
-            Defaults to 0.
+            A positive value adds a gap between subsets, a negative value makes them overlap. This is a
+            single scalar applied to both axes -- the per-axis step is ``height + subset_overlap`` and
+            ``width + subset_overlap``, which is enough to get a sensible anisotropic grid spacing
+            without a second overlap control. Defaults to 0.
         """
         app = QtWidgets.QApplication.instance()
         if app is None:
@@ -233,7 +241,8 @@ class SelectionGUI(QtWidgets.QMainWindow):
         self.setWindowTitle("ROI Selection Tool")
         self.resize(1200, 800)
 
-        self.subset_size = subset_size
+        h, w = _as_size_pair(subset_size)
+        self.subset_size = (int(h), int(w))
         self.subset_overlap = subset_overlap
 
         self._paint_mask = None  # Same shape as the image
@@ -470,6 +479,104 @@ class SelectionGUI(QtWidgets.QMainWindow):
 
         self.automatic_layout.addStretch(1)
 
+    def _make_subset_size_spinbox(self, initial_value: int) -> QtWidgets.QSpinBox:
+        """Create a subset-size QSpinBox with the styling shared by the height/width spinboxes.
+
+        :param initial_value: starting value of the spinbox
+        :type initial_value: int
+        :rtype: QtWidgets.QSpinBox
+        """
+        spinbox = QtWidgets.QSpinBox()
+        spinbox.setRange(1, 1000)
+        spinbox.setValue(initial_value)
+        spinbox.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
+        spinbox.setSingleStep(2)
+        spinbox.setMinimum(1)
+        spinbox.setMaximum(999)
+        spinbox.setWrapping(False)
+        spinbox.setSuffix("px")
+        spinbox.setFixedWidth(80)
+        return spinbox
+
+    def get_subset_size(self):
+        """Return the current subset size as a (height, width) tuple of ints.
+
+        :rtype: tuple of int
+        """
+        return (self.subset_height_spinbox.value(), self.subset_width_spinbox.value())
+
+    def toggle_square_subsets(self, checked: bool):
+        """Handle the "Square subsets" checkbox: lock/unlock the width axis.
+
+        When checked, the width spinbox is disabled and snapped to the current height, and the
+        width slider is hidden, so the two axes are visually and functionally merged. When
+        unchecked, both become independently editable.
+
+        :param checked: new checkbox state
+        :type checked: bool
+        """
+        self.subset_width_spinbox.setEnabled(not checked)
+        self.subset_width_slider.setVisible(not checked)
+
+        if checked:
+            self._set_subset_width_value(self.subset_height_spinbox.value())
+            self.recompute_roi_points()
+
+    def _set_subset_width_value(self, value: int):
+        """Set the width spinbox/slider to ``value`` without re-entering their handlers.
+
+        :param value: new width value
+        :type value: int
+        """
+        self.subset_width_spinbox.blockSignals(True)
+        self.subset_width_spinbox.setValue(value)
+        self.subset_width_spinbox.blockSignals(False)
+
+        slider_value = min(100, max(1, value))
+        self.subset_width_slider.blockSignals(True)
+        self.subset_width_slider.setValue(slider_value)
+        self.subset_width_slider.blockSignals(False)
+
+    def _sync_square_width_and_recompute(self):
+        """If "Square subsets" is checked, mirror the height into the width; always recompute."""
+        if self.square_subsets_checkbox.isChecked():
+            self._set_subset_width_value(self.subset_height_spinbox.value())
+        self.recompute_roi_points()
+
+    def update_subset_height_from_slider(self, value):
+        """Update the height spinbox from the height slider value and recompute ROI points."""
+        self.subset_height_spinbox.blockSignals(True)
+        self.subset_height_spinbox.setValue(value)
+        self.subset_height_spinbox.blockSignals(False)
+
+        self._sync_square_width_and_recompute()
+
+    def update_subset_height_from_spinbox(self, value):
+        """Update the height slider from the height spinbox value and recompute ROI points."""
+        slider_value = min(100, max(1, value))
+        self.subset_height_slider.blockSignals(True)
+        self.subset_height_slider.setValue(slider_value)
+        self.subset_height_slider.blockSignals(False)
+
+        self._sync_square_width_and_recompute()
+
+    def update_subset_width_from_slider(self, value):
+        """Update the width spinbox from the width slider value and recompute ROI points."""
+        self.subset_width_spinbox.blockSignals(True)
+        self.subset_width_spinbox.setValue(value)
+        self.subset_width_spinbox.blockSignals(False)
+
+        self.recompute_roi_points()
+
+    def update_subset_width_from_spinbox(self, value):
+        """Update the width slider from the width spinbox value and recompute ROI points."""
+        slider_value = min(100, max(1, value))
+        self.subset_width_slider.blockSignals(True)
+        self.subset_width_slider.setValue(slider_value)
+        self.subset_width_slider.blockSignals(False)
+
+        self.recompute_roi_points()
+
     def ui_manual_right_menu(self):
         # Number of selected subsets
         self.points_label = QtWidgets.QLabel("Selected subsets: 0")
@@ -511,32 +618,54 @@ class SelectionGUI(QtWidgets.QMainWindow):
         config_group = QtWidgets.QGroupBox("Subset Configuration")
         config_layout = QtWidgets.QVBoxLayout(config_group)
         
-        # Subset size input
+        # Square subsets toggle: checked by default, but unchecked automatically if
+        # constructed with an already-anisotropic (h, w) pair, so the checkbox state
+        # matches the sizes it was started with.
+        square_default = self.subset_size[0] == self.subset_size[1]
+        self.square_subsets_checkbox = QtWidgets.QCheckBox("Square subsets")
+        self.square_subsets_checkbox.setChecked(square_default)
+        self.square_subsets_checkbox.toggled.connect(self.toggle_square_subsets)
+        config_layout.addWidget(self.square_subsets_checkbox)
+
+        # Subset size input: height x width. The label sits on its own row above the
+        # spinboxes -- previously it shared a row with both spinboxes and got clipped
+        # to "Subset size (h" in the panel's default width.
+        config_layout.addWidget(QtWidgets.QLabel("Subset size (h x w):"))
+
         self.subset_size_layout = QtWidgets.QHBoxLayout()
-        self.subset_size_layout.addWidget(QtWidgets.QLabel("Subset size:"))
-        
-        self.subset_size_spinbox = QtWidgets.QSpinBox()
-        self.subset_size_spinbox.setRange(1, 1000)
-        self.subset_size_spinbox.setValue(self.subset_size)
-        self.subset_size_spinbox.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
-        self.subset_size_spinbox.setSingleStep(2)
-        self.subset_size_spinbox.setMinimum(1)
-        self.subset_size_spinbox.setMaximum(999)
-        self.subset_size_spinbox.setWrapping(False)
-        self.subset_size_spinbox.setSuffix("px")
-        self.subset_size_spinbox.setFixedWidth(80)
-        self.subset_size_spinbox.valueChanged.connect(self.update_subset_size_from_spinbox)
-        self.subset_size_layout.addWidget(self.subset_size_spinbox)
-        
+
+        self.subset_height_spinbox = self._make_subset_size_spinbox(self.subset_size[0])
+        self.subset_height_spinbox.valueChanged.connect(self.update_subset_height_from_spinbox)
+        self.subset_size_layout.addWidget(self.subset_height_spinbox)
+        # Kept as an explicit alias for the height spinbox for backward compatibility --
+        # docs/source/quick_start/make_selection_animation.py and possibly user scripts
+        # reach for this name.
+        self.subset_size_spinbox = self.subset_height_spinbox
+
+        self.subset_size_layout.addWidget(QtWidgets.QLabel("x"))
+
+        self.subset_width_spinbox = self._make_subset_size_spinbox(self.subset_size[1])
+        self.subset_width_spinbox.valueChanged.connect(self.update_subset_width_from_spinbox)
+        self.subset_width_spinbox.setEnabled(not square_default)
+        self.subset_size_layout.addWidget(self.subset_width_spinbox)
+
         self.subset_size_layout.addStretch()  # Push everything to the left
         config_layout.addLayout(self.subset_size_layout)
-        
-        self.subset_size_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
-        self.subset_size_slider.setRange(1, 100)
-        self.subset_size_slider.setValue(self.subset_size)
-        self.subset_size_slider.setSingleStep(1)
-        self.subset_size_slider.valueChanged.connect(self.update_subset_size_from_slider)
-        config_layout.addWidget(self.subset_size_slider)
+
+        self.subset_height_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
+        self.subset_height_slider.setRange(1, 100)
+        self.subset_height_slider.setValue(self.subset_size[0])
+        self.subset_height_slider.setSingleStep(1)
+        self.subset_height_slider.valueChanged.connect(self.update_subset_height_from_slider)
+        config_layout.addWidget(self.subset_height_slider)
+
+        self.subset_width_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
+        self.subset_width_slider.setRange(1, 100)
+        self.subset_width_slider.setValue(self.subset_size[1])
+        self.subset_width_slider.setSingleStep(1)
+        self.subset_width_slider.valueChanged.connect(self.update_subset_width_from_slider)
+        self.subset_width_slider.setVisible(not square_default)
+        config_layout.addWidget(self.subset_width_slider)
 
         # Show ROI rectangles
         self.show_roi_checkbox = QtWidgets.QCheckBox("Show subsets")
@@ -904,41 +1033,47 @@ class SelectionGUI(QtWidgets.QMainWindow):
             self.roi_overlay.clear()
             return
 
-        subset_size = self.subset_size_spinbox.value()
-        half = subset_size // 2
+        subset_h, subset_w = self.get_subset_size()
+        half_h = subset_h // 2
+        half_w = subset_w // 2
 
         # selected_points = np.round(np.array(self.selected_points) - 0.5)
         selected_points = np.array(self.selected_points)
 
         # --- Rectangles ---
         if self.show_roi_checkbox.isChecked():
-            h, w = self.image_item.image.shape[:2]
-            overlay = np.zeros((h, w, 4), dtype=np.uint8)  # RGBA
+            # image_item.image / roi_overlay are column-major (pyqtgraph's default
+            # axisOrder): array axis 0 is the image's x/width axis, axis 1 is its
+            # y/height axis.
+            n_x, n_y = self.image_item.image.shape[:2]
+            overlay = np.zeros((n_x, n_y, 4), dtype=np.uint8)  # RGBA
 
-            for y, x in selected_points:
-                x0 = int(round(x - half))
-                y0 = int(round(y - half))
-                x1 = int(round(x + half+1))
-                y1 = int(round(y + half+1))
+            for px, py in selected_points:
+                # px, py are the point's real (x, y) = (column, row); half_w pairs
+                # with array axis 0 (x), half_h with array axis 1 (y).
+                ix0 = int(round(px - half_w))
+                iy0 = int(round(py - half_h))
+                ix1 = int(round(px + half_w+1))
+                iy1 = int(round(py + half_h+1))
 
                 # Ensure bounds
-                if x0 < 0 or y0 < 0 or x1 >= w or y1 >= h:
+                if ix0 < 0 or iy0 < 0 or ix1 >= n_x or iy1 >= n_y:
                     continue
 
                 # Fill interior (semi-transparent green)
-                overlay[y0:y1, x0:x1, 1] = 180  # green
-                overlay[y0:y1, x0:x1, 3] = 40   # alpha
+                overlay[ix0:ix1, iy0:iy1, 1] = 180  # green
+                overlay[ix0:ix1, iy0:iy1, 3] = 40   # alpha
 
                 # Outline (more opaque green)
-                overlay[y0, x0:x1, 1] = 255  # top
-                overlay[y1 - 1, x0:x1, 1] = 255  # bottom
-                overlay[y0:y1, x0, 1] = 255  # left
-                overlay[y0:y1, x1 - 1, 1] = 255  # right
+                overlay[ix0, iy0:iy1, 1] = 255  # left
+                overlay[ix1 - 1, iy0:iy1, 1] = 255  # right
+                overlay[ix0:ix1, iy0, 1] = 255  # top
+                overlay[ix0:ix1, iy1 - 1, 1] = 255  # bottom
 
-                overlay[y0, x0:x1, 3] = 150
-                overlay[y1 - 1, x0:x1, 3] = 150
-                overlay[y0:y1, x0, 3] = 150
-                overlay[y0:y1, x1 - 1, 3] = 150
+                overlay[ix0, iy0:iy1, 3] = 150
+                overlay[ix1 - 1, iy0:iy1, 3] = 150
+                overlay[ix0:ix1, iy0, 3] = 150
+                overlay[ix0:ix1, iy1 - 1, 3] = 150
 
             self.roi_overlay.setImage(overlay, autoLevels=False)
             self.roi_overlay.setZValue(1)
@@ -975,29 +1110,8 @@ class SelectionGUI(QtWidgets.QMainWindow):
         # Recompute ROI points
         self.recompute_roi_points()
 
-    def update_subset_size_from_slider(self, value):
-        """Update subset size spinbox from slider value and recompute ROI points."""
-        # Update spinbox without triggering its signal
-        self.subset_size_spinbox.blockSignals(True)
-        self.subset_size_spinbox.setValue(value)
-        self.subset_size_spinbox.blockSignals(False)
-        
-        # Recompute ROI points and update display
-        self.recompute_roi_points()
-
-    def update_subset_size_from_spinbox(self, value):
-        """Update subset size slider from spinbox value and recompute ROI points."""
-        # Update slider, clamping to its range
-        slider_value = min(100, max(1, value))
-        self.subset_size_slider.blockSignals(True)
-        self.subset_size_slider.setValue(slider_value)
-        self.subset_size_slider.blockSignals(False)
-        
-        # Recompute ROI points and update display
-        self.recompute_roi_points()
-
     def recompute_roi_points(self):
-        subset_size = self.subset_size_spinbox.value()
+        subset_size = self.get_subset_size()
         spacing = self.distance_spinbox.value()
 
         # Update all "along the line" polygons
@@ -1291,7 +1405,7 @@ class SelectionGUI(QtWidgets.QMainWindow):
 
             # Compute ROI points only if closed polygon
             if len(grid['points']) >= 3:
-                subset_size = self.subset_size_spinbox.value()
+                subset_size = self.get_subset_size()
                 spacing = self.distance_spinbox.value()
                 grid['roi_points'] = rois_inside_polygon(grid['points'], subset_size, spacing)
 
@@ -1396,7 +1510,7 @@ class SelectionGUI(QtWidgets.QMainWindow):
 
             # Update ROI points only for this polygon
             if len(poly['points']) >= 2:
-                subset_size = self.subset_size_spinbox.value()
+                subset_size = self.get_subset_size()
                 spacing = self.distance_spinbox.value()
                 poly['roi_points'] = points_along_polygon(poly['points'], subset_size, spacing)
 
@@ -1490,22 +1604,25 @@ class SelectionGUI(QtWidgets.QMainWindow):
         """Compute good feature points using structure tensor analysis (Shi–Tomasi style)."""
         from scipy.ndimage import sobel
 
-        subset_size = self.subset_size_spinbox.value()
-        roi_size = subset_size // 2
+        subset_h, subset_w = self.get_subset_size()
+        half_h = subset_h // 2
+        half_w = subset_w // 2
 
         img = self.image_item.image.astype(np.float32)
         candidates = []
 
+        # img is column-major (pyqtgraph's default axisOrder): array axis 0 is
+        # the image's x/width axis, axis 1 is its y/height axis.
         # All selected points (not just manual)
-        for row, col in self.selected_points:
-            y, x = int(round(row)), int(round(col))
+        for px, py in self.selected_points:
+            ix, iy = int(round(px)), int(round(py))
 
-            if (y - roi_size < 0 or y + roi_size + 1 > img.shape[0] or
-                x - roi_size < 0 or x + roi_size + 1 > img.shape[1]):
+            if (ix - half_w < 0 or ix + half_w + 1 > img.shape[0] or
+                iy - half_h < 0 or iy + half_h + 1 > img.shape[1]):
                 continue
 
-            roi = img[y - roi_size: y + roi_size + 1,
-                    x - roi_size: x + roi_size + 1]
+            roi = img[ix - half_w: ix + half_w + 1,
+                    iy - half_h: iy + half_h + 1]
 
             # Compute gradients
             gx = sobel(roi, axis=1)
@@ -1521,7 +1638,10 @@ class SelectionGUI(QtWidgets.QMainWindow):
             eigvals = np.linalg.eigvalsh(matrix)  # sorted ascending
             min_eig = eigvals[0]
 
-            candidates.append((x + 0.0, y + 0.0, min_eig))
+            # Stored (y, x, value): update_threshold_and_show_shi_tomsi (outside this
+            # function, unchanged) unpacks this as (x, y, e) and reverses it back to
+            # (x, y) -- keep that round-trip intact.
+            candidates.append((py + 0.0, px + 0.0, min_eig))
 
         if not candidates:
             self.candidate_points = []
@@ -1619,21 +1739,24 @@ class SelectionGUI(QtWidgets.QMainWindow):
             return
 
         dy, dx = self.gradient_direction
-        subset_size = self.subset_size_spinbox.value()
-        roi_size = subset_size // 2
+        subset_h, subset_w = self.get_subset_size()
+        half_h = subset_h // 2
+        half_w = subset_w // 2
 
         img = self.image_item.image.astype(np.float32)
         candidates = []
 
-        for row, col in self.selected_points:
-            y, x = int(round(row)), int(round(col))
+        # img is column-major (pyqtgraph's default axisOrder): array axis 0 is
+        # the image's x/width axis, axis 1 is its y/height axis.
+        for px, py in self.selected_points:
+            ix, iy = int(round(px)), int(round(py))
 
-            if (y - roi_size < 0 or y + roi_size + 1 > img.shape[0] or
-                x - roi_size < 0 or x + roi_size + 1 > img.shape[1]):
+            if (ix - half_w < 0 or ix + half_w + 1 > img.shape[0] or
+                iy - half_h < 0 or iy + half_h + 1 > img.shape[1]):
                 continue
 
-            roi = img[y - roi_size: y + roi_size + 1,
-                    x - roi_size: x + roi_size + 1]
+            roi = img[ix - half_w: ix + half_w + 1,
+                    iy - half_h: iy + half_h + 1]
 
             gx = sobel(roi, axis=1)
             gy = sobel(roi, axis=0)
@@ -1641,7 +1764,10 @@ class SelectionGUI(QtWidgets.QMainWindow):
             gdir = np.abs(gx * dx) + np.abs(gy * dy)
             strength = np.sum(np.abs(gdir))
 
-            candidates.append((x + 0.0, y + 0.0, strength))
+            # Stored (y, x, value): update_threshold_and_show_gradient_direction
+            # (outside this function, unchanged) unpacks this as (x, y, v) and
+            # reverses it back to (x, y) -- keep that round-trip intact.
+            candidates.append((py + 0.0, px + 0.0, strength))
 
         if not candidates:
             self.candidate_points = []
@@ -1704,7 +1830,7 @@ class SelectionGUI(QtWidgets.QMainWindow):
         if self._paint_mask is None:
             return
 
-        subset_size = self.subset_size_spinbox.value()
+        subset_size = self.get_subset_size()
         spacing = self.distance_spinbox.value()
 
         # Generate (row, col) points inside the painted mask

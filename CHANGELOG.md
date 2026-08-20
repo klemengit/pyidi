@@ -105,11 +105,13 @@ development was not reachable from the documented workflow. There is now one.
   methods (grid in a polygon, manual points, along a polyline, brush, and
   remove-point) plus automatic filtering by Shi-Tomasi corner strength or
   gradient direction. It requires the Qt extras: `pip install pyidi[qt]`.
-- **Note for `LucasKanade` users:** `SubsetSelection` accepted an anisotropic
-  `roi_size=(y, x)`; `SelectionGUI` currently takes a scalar `subset_size` and
-  can only select square subsets. `LucasKanade.configure(roi_size=...)` still
-  accepts a `(vertical, horizontal)` pair, so non-square ROIs remain available
-  programmatically and through the napari `GUI`, just not through `SelectionGUI`.
+- **Note for `LucasKanade` users:** `SelectionGUI` can select anisotropic
+  subsets again. `subset_size` accepts a scalar or a `(height, width)` pair,
+  in the same `(vertical, horizontal)` convention as
+  `LucasKanade.configure(roi_size=...)`. In the UI, a `Square subsets`
+  checkbox (checked by default) keeps the previous square-only behaviour;
+  unchecking it frees the height and width spinboxes/sliders to be set
+  independently.
 - Removed the dead selection code: `tools.ManualROI`, `tools.GridOfROI` (both
   read a `video.reader.mraw` attribute that no longer exists), the unreachable
   `PickPoints` class in `_simplified_optical_flow.py`, and the stray

@@ -15,11 +15,68 @@ import numpy as np
 import pytest
 
 from pyidi.selection_geometry import (
+    _as_size_pair,
     get_roi_grid,
     points_along_polygon,
     rois_inside_polygon,
     rois_inside_mask,
 )
+
+
+# ---------------------------------------------------------------------------
+# _as_size_pair -- scalar/pair normalization shared by the (x, y) helpers
+# ---------------------------------------------------------------------------
+
+def test_as_size_pair_broadcasts_scalar():
+    assert _as_size_pair(10) == (10.0, 10.0)
+    assert _as_size_pair(7.5) == (7.5, 7.5)
+
+
+def test_as_size_pair_passes_through_height_width_pair():
+    assert _as_size_pair((5, 21)) == (5.0, 21.0)
+    assert _as_size_pair([5, 21]) == (5.0, 21.0)
+
+
+def test_as_size_pair_raises_for_wrong_length():
+    with pytest.raises(ValueError, match=r"subset_size"):
+        _as_size_pair((1, 2, 3))
+    with pytest.raises(ValueError, match=r"subset_size"):
+        _as_size_pair([1])
+
+
+def test_as_size_pair_error_message_reports_shape_not_length():
+    """A 2-D input like a (2, 2) array must report its actual shape, not "length 2".
+
+    ``len(arr)`` on a (2, 2) array is 2, which is both wrong (the problem is
+    the shape, not the length) and confusing (2 looks like a valid pair
+    length). The message must show the real shape instead.
+    """
+    with pytest.raises(ValueError, match=r"got shape \(2, 2\)"):
+        _as_size_pair(np.array([[1, 2], [3, 4]]))
+
+
+def test_as_size_pair_preserves_integrality():
+    """Integer input -> int output; any float involved -> float output.
+
+    This is the property that keeps ``rois_inside_polygon`` /
+    ``rois_inside_mask`` returning integer coordinates for ordinary
+    (integer) GUI input, so ``IDIMethod.set_points()`` does not mistake
+    them for sub-pixel points and warn.
+    """
+    h, w = _as_size_pair(10)
+    assert isinstance(h, int) and isinstance(w, int)
+
+    h, w = _as_size_pair((5, 21))
+    assert isinstance(h, int) and isinstance(w, int)
+
+    h, w = _as_size_pair(np.int64(7))
+    assert isinstance(h, int) and isinstance(w, int)
+
+    h, w = _as_size_pair(10.5)
+    assert isinstance(h, float) and isinstance(w, float)
+
+    h, w = _as_size_pair((5, 21.0))
+    assert isinstance(h, float) and isinstance(w, float)
 
 
 # ---------------------------------------------------------------------------
@@ -127,6 +184,49 @@ def test_rois_inside_polygon_returns_empty_for_fewer_than_3_vertices():
     assert rois_inside_polygon([(0, 0), (1, 1)], 5, 0) == []
 
 
+def test_rois_inside_polygon_anisotropic_subset_size_spaces_axes_differently():
+    """subset_size=(h, w) must space x by w and y by h, not by a shared step."""
+    poly = [(0, 0), (0, 100), (100, 100), (100, 0)]  # (x, y), x in 0..100, y in 0..100
+    pts = np.array(rois_inside_polygon(poly, subset_size=(5, 21), spacing=0))
+
+    xs = np.array(sorted(set(pts[:, 0].tolist())))
+    ys = np.array(sorted(set(pts[:, 1].tolist())))
+
+    assert len(xs) > 1 and len(ys) > 1
+    assert np.all(np.diff(xs) == 21)  # w + spacing
+    assert np.all(np.diff(ys) == 5)   # h + spacing
+
+
+def test_rois_inside_polygon_scalar_matches_equal_pair():
+    poly = [(0, 0), (0, 40), (60, 40), (60, 0)]
+    scalar = rois_inside_polygon(poly, subset_size=10, spacing=0)
+    pair = rois_inside_polygon(poly, subset_size=(10, 10), spacing=0)
+    assert scalar == pair
+
+
+def test_rois_inside_polygon_integer_input_returns_integer_coordinates():
+    """Integer subset_size/spacing must not produce float coordinates.
+
+    Regression guard: a naive scalar-or-pair normalizer that always casts
+    to float would make every ordinary (integer) GUI selection come back
+    as float points, which downstream trips ``IDIMethod.set_points()``'s
+    sub-pixel-rounding warning on input that was never sub-pixel.
+    """
+    poly = [(0, 0), (0, 40), (60, 40), (60, 0)]
+
+    scalar_pts = rois_inside_polygon(poly, subset_size=10, spacing=0)
+    assert len(scalar_pts) > 0
+    for x, y in scalar_pts:
+        assert isinstance(x, (int, np.integer))
+        assert isinstance(y, (int, np.integer))
+
+    pair_pts = rois_inside_polygon(poly, subset_size=(10, 15), spacing=0)
+    assert len(pair_pts) > 0
+    for x, y in pair_pts:
+        assert isinstance(x, (int, np.integer))
+        assert isinstance(y, (int, np.integer))
+
+
 # ---------------------------------------------------------------------------
 # points_along_polygon -- (x, y) convention
 # ---------------------------------------------------------------------------
@@ -151,6 +251,64 @@ def test_points_along_polygon_skips_zero_length_segments():
     assert pts == [(0, 0), (10, 0), (20, 0)]
 
 
+def test_points_along_polygon_horizontal_segment_steps_by_width():
+    """A purely horizontal segment must step by w (+ spacing), not h.
+
+    The rounded (x, y) output has a small alternating +-1 rounding
+    artefact around the true step (a pre-existing property of the -0.5
+    pixel-centre shift, not something introduced here), so the step is
+    checked through the point count -- ``int(length // step) + 1`` --
+    which cleanly distinguishes a step of 21 (w) from one of 5 (h).
+    """
+    poly = [(0, 0), (100, 0)]
+    pts = points_along_polygon(poly, subset_size=(5, 21), spacing=0)
+    assert len(pts) == int(100 // 21) + 1 == 5
+
+
+def test_points_along_polygon_vertical_segment_steps_by_height():
+    """A purely vertical segment must step by h (+ spacing), not w."""
+    poly = [(0, 0), (0, 100)]
+    pts = points_along_polygon(poly, subset_size=(5, 21), spacing=0)
+    assert len(pts) == int(100 // 5) + 1 == 21
+
+
+def test_points_along_polygon_45_degree_regression_square_subset_step_unchanged():
+    """A square subset must still yield step == subset_size at 45 degrees.
+
+    This pins the reason the extent formula in the implementation is
+    sqrt((dx*w)**2 + (dy*h)**2) and not |dx|*w + |dy|*h: for h == w == s,
+    the former reduces to exactly s for every segment angle (the old,
+    isotropic, pre-anisotropic-support behaviour), while the latter would
+    give s*sqrt(2) here (a step of ~14 instead of 10, i.e. roughly half as
+    many points along the diagonal). The expected points below were also
+    verified against the pre-change implementation for this exact input.
+    """
+    poly = [(0, 0), (50, 50)]
+    pts = points_along_polygon(poly, subset_size=10, spacing=0)
+
+    expected = [(0, 0), (7, 7), (14, 14), (21, 21), (28, 28), (35, 35), (42, 42), (49, 49)]
+    assert pts == expected
+
+
+def test_points_along_polygon_scalar_matches_equal_pair():
+    poly = [(0, 0), (30, 17), (5, 40)]
+    scalar = points_along_polygon(poly, subset_size=10, spacing=2)
+    pair = points_along_polygon(poly, subset_size=(10, 10), spacing=2)
+    assert scalar == pair
+
+
+def test_points_along_polygon_integer_input_returns_integer_coordinates():
+    """Integer subset_size/spacing (scalar and pair) -> integer points."""
+    poly = [(0, 0), (30, 17), (5, 40)]
+
+    for subset_size in (10, (10, 15)):
+        pts = points_along_polygon(poly, subset_size=subset_size, spacing=2)
+        assert len(pts) > 0
+        for x, y in pts:
+            assert isinstance(x, (int, np.integer))
+            assert isinstance(y, (int, np.integer))
+
+
 # ---------------------------------------------------------------------------
 # rois_inside_mask -- mask[y, x] in, (y, x) out
 # ---------------------------------------------------------------------------
@@ -170,6 +328,52 @@ def test_rois_inside_mask_true_region_returns_yx_points():
 def test_rois_inside_mask_all_false_returns_empty():
     mask = np.zeros((20, 20), dtype=bool)
     assert rois_inside_mask(mask, subset_size=5, spacing=0) == []
+
+
+def test_rois_inside_mask_anisotropic_subset_size_spaces_axes_differently():
+    """subset_size=(h, w) must space y by h and x by w, not by a shared step."""
+    mask = np.ones((100, 100), dtype=bool)
+    pts = np.array(rois_inside_mask(mask, subset_size=(5, 21), spacing=0))
+
+    ys = np.array(sorted(set(pts[:, 0].tolist())))
+    xs = np.array(sorted(set(pts[:, 1].tolist())))
+
+    assert len(ys) > 1 and len(xs) > 1
+    assert np.all(np.diff(ys) == 5)   # h + spacing
+    assert np.all(np.diff(xs) == 21)  # w + spacing
+
+
+def test_rois_inside_mask_scalar_matches_equal_pair():
+    mask = np.zeros((20, 20), dtype=bool)
+    mask[5:15, 5:15] = True
+    scalar = rois_inside_mask(mask, subset_size=5, spacing=0)
+    pair = rois_inside_mask(mask, subset_size=(5, 5), spacing=0)
+    assert scalar == pair
+
+
+def test_rois_inside_mask_integer_input_returns_integer_coordinates():
+    """Integer subset_size/spacing (scalar and pair) -> integer points."""
+    mask = np.ones((30, 30), dtype=bool)
+
+    for subset_size in (5, (5, 8)):
+        pts = rois_inside_mask(mask, subset_size=subset_size, spacing=0)
+        assert len(pts) > 0
+        for y, x in pts:
+            assert isinstance(y, (int, np.integer))
+            assert isinstance(x, (int, np.integer))
+
+
+def test_rois_inside_mask_float_subset_size_does_not_crash():
+    """A float subset_size is legitimate per the docstring and must not
+    crash the mask[y, x] indexing (it previously did, via a float-dtype
+    np.arange), even though it degrades to truncated pixel indices."""
+    mask = np.ones((30, 30), dtype=bool)
+    pts = rois_inside_mask(mask, subset_size=10.5, spacing=0)
+    assert len(pts) > 0
+    for y, x in pts:
+        assert isinstance(y, (int, np.integer))
+        assert isinstance(x, (int, np.integer))
+        assert mask[y, x]
 
 
 # ---------------------------------------------------------------------------
