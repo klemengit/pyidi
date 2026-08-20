@@ -128,3 +128,8 @@ server_user_id.txt
 data_synthetic_pyidi_analysis/
 temp_file/
 data/data_*_pyidi_analysis/analysis_*/
+
+# examples/eulerian_magnification_varcila.py outputs (VideoReader temp root + generated clips)
+examples/evm_tmp_root/
+examples/evm_*.mp4
+examples/evm_*.gif

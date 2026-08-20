@@ -63,7 +63,12 @@ def _validate_filter_type(filter_type):
 
 
 def _max_pyramid_levels(height, width, min_size=4):
-    """Largest number of pyramid levels keeping the smallest dimension >= min_size."""
+    """Largest number of pyramid levels keeping the smallest dimension >= min_size.
+
+    Floored to at least 1: a pyramid needs at least one level, so a frame too small
+    to satisfy ``min_size`` after even one downsample still gets 1 level, with a
+    residual smaller than ``min_size``.
+    """
     smallest = min(height, width)
     levels = 0
     while smallest // 2 >= min_size:
@@ -171,16 +176,23 @@ def _level_amplifications(n_levels, amplification, lambda_c, image_shape):
 
     height, width = image_shape
     delta = lambda_c / 8.0 / (1.0 + amplification)
+    # Lambda is largest at the coarsest band and halves toward the finest, so
+    # fine/noisy levels get attenuated while coarse levels (real structural
+    # motion) approach the full amplification (Wu et al. 2012, Sec. 4).
     lam = np.sqrt(height ** 2 + width ** 2) / 3.0
 
-    factors = []
-    for lvl in range(n_levels + 1):
-        if lvl == 0 or lvl == n_levels:
-            factors.append(0.0)  # ignore finest band and low-pass residual
-        else:
-            curr = lam / delta / 8.0 - 1.0
-            factors.append(float(np.clip(curr, 0.0, amplification)))
+    factors = [0.0] * (n_levels + 1)  # finest band and low-pass residual stay 0
+    for lvl in range(n_levels - 1, 0, -1):
+        curr = lam / delta / 8.0 - 1.0
+        factors[lvl] = float(np.clip(curr, 0.0, amplification))
         lam /= 2.0
+
+    if not any(factors[:n_levels]):
+        warnings.warn(
+            "'lambda_c' attenuated all pyramid levels to zero; the magnified output "
+            "will equal the input. Increase 'lambda_c', reduce 'amplification', or "
+            "use more pyramid 'levels'."
+        )
     return factors
 
 
@@ -389,7 +401,13 @@ class EulerianMagnifier:
         if self.magnified is None or frame_range is not None:
             self.get_magnified_video(frame_range=frame_range)
 
-        write_fps = int(fps if fps is not None else (self.fps or 30))
+        resolved_fps = fps if fps is not None else self.fps
+        if not resolved_fps:
+            raise ValueError(
+                "No frame rate available to write the video. Pass fps=... or set it "
+                "via configure(fps=...)."
+            )
+        write_fps = int(resolved_fps)
         frames_8bit = self._to_uint8_rgb(self.magnified, self._display_range)
 
         uri = f"{filename}.{output_format}"

@@ -17,6 +17,7 @@ keep memory bounded.
 """
 
 import os
+import sys
 
 import numpy as np
 import cv2
@@ -28,9 +29,21 @@ from pyidi.postprocessing import EulerianMagnifier
 # %%
 # ---- Configuration -----------------------------------------------------------
 
-VIDEO_PATH = (
+# This example needs a user-supplied high-speed recording; it is not shipped with
+# the repo. Pass its path as a command-line argument, or edit the fallback below:
+#   python eulerian_magnification_varcila.py /path/to/video.mp4
+VIDEO_PATH = sys.argv[1] if len(sys.argv) > 1 else (
     "/home/klemenzaletelj/Data/Projekti/_Arhiv/Varcila_high_speed/video.mp4"
 )
+if not os.path.exists(VIDEO_PATH):
+    print(
+        "This example needs a user-supplied high-speed recording, which is not "
+        "shipped with the repo.\n"
+        f"  Pass the path as an argument:  python {os.path.basename(__file__)} /path/to/video.mp4\n"
+        "  or edit VIDEO_PATH at the top of this script."
+    )
+    sys.exit(1)
+
 FPS = 60                  # true capture rate (from the analysis notebooks)
 N_FRAMES = 1200           # ~20 s -> ~7 periods of the 0.375 Hz mode
 DOWNSCALE = 3             # spatial factor: 1920x1080 -> 640x360 (bounds memory)
@@ -42,7 +55,8 @@ FREQ_BAND = (0.70, 0.80)  # ~0.75 Hz mode (Varcila_shape2)
 AMPLIFICATION = 30        # alpha; motion is sub-pixel + downscaled, so amplify hard
 LEVELS = 4
 FILTER_TYPE = "ideal"
-OUTPUT_STEM = os.path.join(os.path.dirname(__file__), "evm_varcila_mode")
+VIDEO_STEM = os.path.splitext(os.path.basename(VIDEO_PATH))[0]
+OUTPUT_STEM = os.path.join(os.path.dirname(__file__), f"evm_{VIDEO_STEM}_mode")
 
 # %%
 # ---- Stream frames in and downscale (avoids a multi-GB full-res load) ---------
