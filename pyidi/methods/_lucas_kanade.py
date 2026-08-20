@@ -990,3 +990,9 @@ def compute_inverse(Gx, Gy, tol=1e-10):
     if not ok:
         return None
     return A_inv
+
+
+# Backwards-compatible aliases: these helpers have been importable under
+# these names since before they were actually compiled.
+compute_inverse_numba = compute_inverse
+compute_delta_numba = compute_delta
