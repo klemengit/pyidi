@@ -9,6 +9,7 @@ except ImportError:
 
 if HAS_PYQT6 or typing.TYPE_CHECKING:
     from .subset_selection import SelectionGUI
+    from .feature_selection import FeatureSelectionGUI
     from .result_viewer import ResultViewer
     from .result_viewer import Viewer
     from .gui import GUI
@@ -16,6 +17,10 @@ else:
     class SelectionGUI:
         def __init__(self, *args, **kwargs):
             raise RuntimeError("SelectionGUI requires the qt extras: pip install pyidi[qt]")
+
+    class FeatureSelectionGUI:
+        def __init__(self, *args, **kwargs):
+            raise RuntimeError("FeatureSelectionGUI requires the qt extras: pip install pyidi[qt]")
 
     class ResultViewer:
         def __init__(self, *args, **kwargs):

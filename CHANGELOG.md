@@ -5,6 +5,88 @@ This changelog starts at version 1.4.0. For earlier versions see the
 
 ## Unreleased
 
+### Automatic feature selection
+
+New `FeatureSelectionGUI`, and the `pyidi.selection` package underneath it,
+add automatic feature selection: score the whole image, then pick the
+best-separated features inside the region you drew, rather than placing
+subsets on a grid and discarding the poor ones. On a random speckle pattern or
+an intricate structure this is the difference between sampling where the
+features are and sampling where the grid happens to fall. Implements the
+workflow discussed in [issue #51](https://github.com/ladisk/pyidi/issues/51),
+using the mask/evaluate/select vocabulary agreed there.
+
+The blocker was never the idea, it was the cost. `SelectionGUI` scores one
+subset at a time — a Sobel and a 2x2 eigendecomposition per point — which is
+fine for a few hundred grid points and takes minutes at one megapixel, so the
+spacing control was really a compute budget. Shi-Tomasi is now computed as a
+whole-image Sobel plus three box sums and a closed-form minimum eigenvalue:
+the same quantity, a few separable passes, tens of milliseconds per megapixel.
+Dense candidates therefore cost nothing and a region goes back to meaning
+"where I want points".
+
+The three steps are separated, and only the middle one is expensive:
+
+- **mask** — regions define an *area*. Each row in the selections list carries
+  a role: `mask` rows contribute their area, `points` rows contribute
+  coordinates that bypass scoring entirely, and the role is switchable per row.
+  Hand-picked points always survive whatever their score, and no automatic
+  point is placed within the minimum distance of one.
+- **evaluate** — Shi-Tomasi and gradient-in-direction, computed over the whole
+  image, with `NaN` marking the border where the subset window would leave it.
+  Scores are named and cached on (evaluator, parameters, subset size), so
+  several coexist and switching between them is free the second time.
+  Evaluators are a registry: a new one is a function plus parameter
+  descriptors, and it appears in the menu with no GUI change.
+- **select** — threshold (by percentile, or by fraction of the maximum) plus
+  greedy minimum-distance suppression. A bare threshold on a dense score image
+  returns a solid blob of adjacent pixels on every corner, so the suppression
+  is what makes the result a set of features. A `lattice` selector reproduces
+  regular grid sampling inside the same pipeline, for full-field work where
+  even coverage matters more than feature strength.
+
+Because a mask or threshold edit only re-derives from a cached score, the
+interface updates while a slider is still moving; only a subset-size or
+evaluator change recomputes.
+
+The pipeline imports without Qt and is usable from a script through
+`pyidi.selection.select_points` (one call) or `SelectionPipeline` (keeps the
+score cache alive across parameter changes).
+
+`Remove point` takes the point's whole reserved disc — its minimum distance —
+out of the mask, not the single pixel under the click. A selected point is re-derived
+from the score on every run, so erasing one pixel just promotes its neighbour
+and the point reappears a couple of pixels along. Removing one is undoable, as
+every other edit is. Hand-placed points are still deleted outright, so clicking
+the same pixel again puts one back.
+
+A click outside the image adds nothing. The view is always larger than the
+frame — the aspect is locked, so one axis has a margin, and zooming out adds
+more — and a subset centred off the frame cannot be tracked; any coordinate that
+reaches the pipeline from elsewhere is dropped there too.
+
+Score images are kept in a bounded cache, eight deep. Each one is a full-frame
+`float32`, 16 MB at 2560x1600, and every distinct set of evaluator parameters is
+a different array, so a direction spin box dragged through sixty values would
+otherwise hold sixty of them. The score overlay is redrawn as part of the
+refresh, so it follows a change of subset size or of evaluator instead of going
+stale.
+
+A deselect stroke touches only the regions it actually covers, rather than
+giving every region on the list a frame-sized erasure array, and an undo
+snapshot holds those arrays by reference rather than copying them into each of
+the fifty slots.
+
+Ctrl is read off the mouse event rather than tracked by a key filter on the
+window, which a panel widget with focus can swallow; letting go of Ctrl
+part-way through a stroke finishes the stroke rather than abandoning it.
+
+**Scores differ slightly from the old per-subset filter near strong edges.**
+`SelectionGUI` ran Sobel on the isolated subset, so gradients at the subset
+border used values reflected from inside it; the whole-image version sees the
+real neighbours. The new value is the correct one. This affects the new module
+only — `SelectionGUI` is untouched and behaves exactly as before.
+
 ### Documentation overhaul
 
 The documentation was restructured around the work done since 1.3.3. New

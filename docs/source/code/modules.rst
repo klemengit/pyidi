@@ -114,6 +114,28 @@ Pure-numpy ROI-grid geometry, shared by the napari ``GUI`` and
 .. automodule:: pyidi.selection_geometry
     :members:
 
+Feature selection pipeline
+--------------------------
+
+The mask -> evaluate -> select pipeline behind
+:doc:`../quick_start/feature_selection`. Importable without Qt, so the whole
+selection can be scripted.
+
+.. automodule:: pyidi.selection.masks
+    :members:
+
+.. automodule:: pyidi.selection.evaluate
+    :members:
+
+.. automodule:: pyidi.selection.scores
+    :members:
+
+.. automodule:: pyidi.selection.select
+    :members:
+
+.. automodule:: pyidi.selection.pipeline
+    :members:
+
 Saved analyses
 --------------
 

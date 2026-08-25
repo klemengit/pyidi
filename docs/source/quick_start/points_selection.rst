@@ -4,6 +4,16 @@ Point selection UI
 ==================
 
 A convenient UI (``SelectionGUI``) is available to make the point selection easier.
+
+.. note::
+
+    ``SelectionGUI`` places the subsets and then filters them. If you would
+    rather score the whole image first and let the selection find the features
+    inside a region -- which is what you want on a random speckle pattern, where
+    a grid mostly misses the good locations -- see
+    :doc:`feature_selection`. Both interfaces are available and neither
+    replaces the other.
+
 It is a PyQt6-based tool, so the ``[qt]`` extra must be installed first:
 
 .. code:: bash

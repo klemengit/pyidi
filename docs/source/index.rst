@@ -45,6 +45,13 @@ sub-pixel displacement history — an array of shape
         The ``SelectionGUI``: grids, polylines, a brush, and automatic
         filtering onto well-textured image content.
 
+    .. grid-item-card:: :octicon:`sparkle-fill` Automatic feature selection
+        :link: quick_start/feature_selection
+        :link-type: doc
+
+        The ``FeatureSelectionGUI``: score the whole image, then let the
+        selection find the best-separated features inside your region.
+
     .. grid-item-card:: :octicon:`beaker` Post-processing
         :link: postprocessing/eulerian_magnification
         :link-type: doc
@@ -98,6 +105,7 @@ What pyIDI does
    quick_start/basic_usage
    quick_start/video_reader
    quick_start/points_selection
+   quick_start/feature_selection
    quick_start/napari
 
 .. toctree::
