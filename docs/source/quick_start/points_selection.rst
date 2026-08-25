@@ -56,18 +56,23 @@ buttons on the right:
 
 - **Grid**: click to place the corners of a polygon; once at least three
   corners are placed, a regular grid of subsets is generated inside the
-  polygon. Multiple grids can be created (``Start new grid``) and managed
-  individually in the list, and deleted with ``Delete selected grid`` —
-  including the last remaining one, which is then re-seeded empty.
-- **Manual**: click on the image to add individual points one at a time.
+  polygon. ``Start new grid`` starts another grid; each one becomes its own
+  row in the selections list, described below.
+- **Manual**: click on the image to add individual points one at a time. All
+  manually clicked points are collected into a single ``Manual`` row in the
+  list.
 - **Along the line**: click to place points defining a polyline; subsets are
-  placed at regular intervals along its segments. As with ``Grid``, multiple
-  lines can be drawn and managed/deleted individually.
+  placed at regular intervals along its segments. ``Start new line`` starts
+  another line; as with ``Grid``, each one becomes its own row in the list.
 - **Brush**: hold Ctrl and drag over the image to paint a region; subsets are
-  placed on a regular grid inside the painted area. The brush radius is set
-  with a slider, and the ``Deselect painted area`` toggle switches the brush
-  to remove already-selected subsets instead of adding new ones.
-- **Remove point**: click near an existing point to remove it.
+  placed on a regular grid inside the painted area. Each stroke becomes its
+  own row in the list. The brush radius is set with a slider, and the
+  ``Deselect painted area`` toggle switches the brush to remove
+  already-selected subsets instead of adding new ones. Deselecting erases only
+  the area actually painted over: a stroke keeps whatever part of it was not
+  covered, and its row disappears only once nothing is left painted.
+- **Remove point**: click near an existing point to remove it. The point
+  stays removed even if the subset size or spacing is changed afterwards.
 
 The ``Subset Configuration`` group lets you adjust the subset size, toggle
 the subset rectangle overlay (``Show subsets``), and clear the current
@@ -75,10 +80,34 @@ selection (``Clear selections``). For ``Grid``, ``Along the line``, and
 ``Brush``, a ``Distance between subsets`` control sets the spacing described
 above.
 
+The selections list
+--------------------
+
+Every selection made in any of the modes above — every grid, every line,
+every brush stroke, and the single ``Manual`` row — is listed in the
+right-hand panel as one always-visible ``selections`` list, regardless of
+which mode is currently active. Each row shows the selection's label and its
+current point count, e.g. ``Grid 1 — 142 pts``, updated live as the selection
+changes.
+
+- **Clicking a row** makes it the active selection, switches the tool to
+  match its type so its vertices are immediately draggable, and rings its
+  points in the image in magenta. The ring is a Select-mode cue and is hidden
+  in Filter mode.
+- **Each row has a checkbox.** Unchecking it excludes that selection's points
+  from the result without deleting it, so a region can be tried in and out
+  without redrawing it.
+- **``Delete selected``** deletes the currently selected row, of any type —
+  including a single brush stroke or the ``Manual`` row.
+- Labels are never reused: deleting ``Grid 2`` and then creating another grid
+  gives ``Grid 4``, not a second ``Grid 3``.
+
 Editing a selection
 -------------------
 
-Grids and polylines stay editable after they are drawn.
+Grids and polylines stay editable after they are drawn. Clicking their row
+in the selections list also switches to the matching tool, so a grid or line
+can be edited without first re-selecting the corresponding button.
 
 **Moving a vertex.** A left-drag that starts within about 10 screen pixels of
 an existing vertex moves that vertex; a drag anywhere else pans the view. The
@@ -88,9 +117,9 @@ an existing vertex does nothing, rather than stacking a duplicate on top of
 it.
 
 **Undo (Ctrl+Z)** reverses adding a vertex, moving a vertex, and deleting a
-grid or polyline. A restored grid comes back at its original position in the
-list, with its original label. Manual points, brush strokes and filter results
-are *not* undoable.
+selection — a grid, a polyline, a brush stroke, or the ``Manual`` row. A
+restored selection comes back at its original row in the list, with its
+original label. Filter results are *not* undoable.
 
 Filter mode
 -----------
@@ -113,6 +142,13 @@ strongly-textured image content. Two filter methods are available:
 Filtered (candidate) points are shown in green; ``Clear candidates`` resets
 the filter back to the full selection from Select mode.
 
+The filter result follows the selection: going back to Select mode and
+removing subsets -- with the brush in deselect mode, with ``Remove point``, or
+by deleting or unchecking a row -- drops their candidates as well. Nothing is
+recomputed, so putting the subsets back (re-checking the row, or undoing the
+deletion) brings their candidates back too. Subsets *added* after a filter has
+run are not scored until the filter is run again.
+
 Retrieving the points
 ----------------------
 
@@ -127,7 +163,10 @@ otherwise, the points from Select mode are returned.
 
 The returned array has shape ``(n_points, 2)``, with points given in
 **row/column** (``y``/``x``) image coordinates: ``points[:, 0]`` is the row
-(``y``) coordinate and ``points[:, 1]`` is the column (``x``) coordinate.
+(``y``) coordinate and ``points[:, 1]`` is the column (``x``) coordinate. The
+points are returned in the order the underlying selections were created
+(across grids, lines, brush strokes and manual clicks combined) — no
+supported use depends on this order.
 
 The points can be passed directly to a method object, either as the GUI
 instance itself (``set_points`` duck-types on a ``.points`` attribute) or as

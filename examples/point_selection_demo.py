@@ -44,15 +44,32 @@ print(f'{video.N} frames, {video.image_height} x {video.image_width} (height x w
 #
 # --- things to check specifically ------------------------------------------
 #
+# The right-hand panel now shows ONE 'selections' list, visible in every mode,
+# with one row per grid, per line, per brush stroke, and a single 'Manual' row
+# collecting every individually-clicked point.
+#
+#   * CLICK A ROW. It should become the active selection, the tool should
+#     switch to match its type (e.g. clicking a Grid row switches to Grid
+#     mode), and its points should highlight in the image.
+#   * TOGGLE A ROW'S CHECKBOX. Unchecking it should remove its points from
+#     gui.points immediately, without deleting the row. Re-checking it should
+#     bring them back.
+#   * DELETE A BRUSH STROKE. Select a Brush row and hit 'Delete selected' -
+#     it should go. Previously a brush stroke could only be removed via
+#     'Clear selections'.
+#   * DELETE THE MANUAL ROW. Same as above - previously not possible either.
+#   * Ctrl+Z AFTER DELETING A BRUSH STROKE. It should come back at its
+#     ORIGINAL row with its ORIGINAL label. Undo now covers deleting any row
+#     (grid, line, brush stroke, or the Manual row), not just grid/line as
+#     before.
+#
 # In Grid or 'Along the line' mode:
 #   * DRAG A VERTEX. Press within ~10 px of a corner you already placed and
 #     drag - it should follow the cursor, and the subsets should re-fill the
 #     new shape when you release. Dragging from empty space still pans.
 #   * CLICK EXACTLY ON A VERTEX. Nothing should happen. It used to drop a
 #     duplicate vertex on top of the existing one.
-#   * Ctrl+Z. Undoes a vertex move, a vertex add, or a grid/line delete. A
-#     deleted grid should come back at its ORIGINAL row in the list, not at
-#     the bottom. (Manual points and brush strokes are NOT undoable.)
+#   * Ctrl+Z. Still undoes a vertex add and a vertex move, one step at a time.
 #   * DELETE THE ONLY GRID/LINE. With exactly one entry in the list, select it
 #     and hit delete - it should go. Previously this silently did nothing and
 #     you had to create a second one first.
@@ -63,6 +80,11 @@ print(f'{video.N} frames, {video.image_height} x {video.image_width} (height x w
 #   * The painted area should now be centred ON the cursor. It used to land
 #     about 9 px up and to the left, because the drag handlers were reading
 #     ViewBox-local coordinates instead of scene coordinates.
+#   * REMOVED POINTS SURVIVE A SPACING CHANGE. Paint a brush stroke (or draw a
+#     grid/line), use 'Remove point' to delete a couple of its points, then
+#     change 'Distance between subsets' or the subset size. The removed
+#     points should stay gone rather than reappearing - previously they were
+#     regenerated from the source geometry and silently came back.
 #
 # CLOSE THE WINDOW to continue.
 # ---------------------------------------------------------------------------

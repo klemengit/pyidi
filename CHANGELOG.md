@@ -116,6 +116,23 @@ converge. The error is now returned as its absolute value.
   `LucasKanade` again.** The 1.4.0 numba rewrite renamed them to
   `compute_inverse` and `compute_delta`; code importing the 1.3.3 names broke
   as soon as it hit that import. Both old names are restored as aliases.
+- **Removed points in `SelectionGUI` no longer reappear after a recompute.**
+  The `Remove point` tool used to delete from a selection's *derived* points,
+  which were regenerated from the source geometry whenever the subset size or
+  spacing changed, so a removed point could silently come back. Removals are
+  now recorded per selection and re-applied after every recompute.
+- **`SelectionGUI`'s brush had its row/column spacing swapped for anisotropic
+  subsets.** For a non-square `subset_size=(height, width)`, the brush laid
+  its grid out with the axes transposed — columns stepped by the height and
+  rows stepped by the width. Square subsets were unaffected. Now fixed.
+- **`Deselect painted area` no longer throws away a whole brush stroke.**
+  Deselecting over any part of a painted region discarded the entire stroke,
+  so nibbling a corner off a large brush selection wiped all of it. The
+  deselect stroke is now subtracted from the painted mask, so only the
+  overlapping area is lost and the rest of the stroke stays; the selection is
+  removed only once nothing is left painted. Because the mask itself is
+  edited rather than its derived points, the deselection also survives a
+  subset-size or spacing change.
 
 ### Point selection consolidated on `SelectionGUI`
 
@@ -167,23 +184,67 @@ development was not reachable from the documented workflow. There is now one.
 
 ### `SelectionGUI` editing
 
-- **The last remaining grid or polyline can now be deleted.** Previously the
-  delete button silently did nothing when only one entry was left, so you had to
-  create a second grid just to remove the first. Deleting the last entry now
-  works and re-seeds an empty one, which is what the old guard was clumsily
-  protecting against.
+- **The four separate selection stores are now one ordered list.** Grids,
+  lines, brush strokes, and manually-clicked points all live in a single
+  always-visible `selections` list in the right-hand panel, replacing the
+  two mode-specific lists (Grid, Along-the-line) and their two delete
+  buttons. Every grid, every drawn line, and every brush stroke gets its own
+  row (`Grid 1`, `Line 1`, `Brush 1`, …); every manually-clicked point
+  is collected into one shared `Manual` row. Each row shows a live point
+  count, e.g. `Grid 1 — 142 pts`. The list is visible in every selection
+  mode, so everything built so far stays in view regardless of which tool is
+  active.
+- **Clicking a row** makes it the active selection, switches the tool to that
+  row's type so its vertices are immediately draggable, and highlights its
+  points in the image with a magenta ring. The highlight is a Select-mode cue
+  and is hidden in Filter mode, where the Select-mode points are not drawn.
+  **Each row has a checkbox** that excludes its points from the result without
+  deleting the row — useful for trying a region in and out.
+- **Any selection can now be deleted, including a brush stroke or the
+  `Manual` row.** One `Delete selected` button replaces the previous
+  `Delete selected grid` / `Delete selected polygon` pair, and works for
+  every kind. Deleting the last remaining selection now simply empties the
+  list, rather than re-seeding an empty placeholder entry as it briefly did.
+- **Row labels are no longer reused.** Deleting `Grid 2` and then creating
+  another grid now gives `Grid 4`, not a second `Grid 3`.
 - **Polygon and grid vertices can be dragged.** A left-drag starting within ~10
   screen pixels of an existing vertex moves it; a drag anywhere else still pans,
   and the grab radius is constant in screen pixels at any zoom. Clicking exactly
   on an existing vertex is now a no-op rather than adding a duplicate on top of
   it. The derived subset points are recomputed once when the drag finishes, not
   on every mouse-move.
-- **Undo (Ctrl+Z)** for adding a vertex, moving a vertex, and deleting a grid or
-  polyline. A restored grid comes back at its original row with its original
-  label. Manual points, brush strokes and filter results are not undoable.
+- **Undo (Ctrl+Z)** now reverses deleting ANY selection — a grid, a line, a
+  brush stroke, or the `Manual` row — in addition to adding and moving a
+  vertex. It previously covered only grid/polyline deletion; brush strokes
+  and the manual row could not be undone at all. A restored selection comes
+  back at its original row with its original label. Filter results are still
+  not undoable.
 - The "Start new line" button now reads "Start new grid" in Grid mode. The
   status-bar hint said "Click 'Start new line' to begin a new grid" and now
   matches the button.
+- **Filter candidates now follow the selection.** The Filter-mode filters score
+  the subsets placed in Select mode, but their result was never revisited when
+  those subsets changed. Deselecting an area with the brush (or removing a
+  point, or deleting/unchecking a row) left its candidates on screen and — since
+  `get_points()` returns the candidates once a filter has been run — in the
+  returned points. Candidates outside the current selection are now dropped, and
+  the threshold sliders can no longer bring them back. The per-subset scores are
+  kept rather than discarded, so this is reversible: re-checking a row, or
+  undoing its deletion, restores its candidates without re-running the filter.
+- **Subset rectangles now have hairline borders.** They used to be painted
+  entirely into one RGBA image the size of the frame, so a border could not be
+  thinner than one *image* pixel — which grows into a thick band as soon as you
+  zoom in, and on an 11 px subset already ate a fifth of its width. The
+  translucent interior is still drawn that way (one upload however many subsets
+  there are), but the borders are now a single vector path stroked with a
+  cosmetic pen, whose width is in *screen* pixels, so they stay one pixel thin
+  at any zoom. Building the interior no longer loops over the points in Python
+  either, which makes the redraw after a subset-size or spacing change several
+  times faster on large selections.
+- **The order of `gui.points`/`gui.get_points()` is now creation order**
+  across all selection types combined, rather than grouped by type (all
+  manual points, then all line points, then all grid points, then all brush
+  points). No supported use depends on point order.
 
 ### Fixed
 

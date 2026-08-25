@@ -27,9 +27,10 @@ construct the window, poke at its state, and grab pixels from it:
   ``app.exec()``, which blocks in the Qt event loop with nothing driving
   it. ``QtWidgets.QApplication.exec`` is therefore also monkeypatched to
   a no-op returning 0, so construction returns immediately with a fully
-  built, shown window that this script can then drive by hand (mutating
-  ``grid_polygons`` directly and calling the GUI's own display/recompute
-  methods, the same calls ``handle_grid_drawing`` makes on a real click).
+  built, shown window that this script can then drive by hand (appending
+  vertices directly to a selection entry's ``geometry`` and calling the
+  GUI's own display/recompute methods, the same calls ``handle_grid_drawing``
+  makes on a real click).
 
 Run with:
 
@@ -47,7 +48,6 @@ import numpy as np  # noqa: E402
 from PyQt6 import QtGui, QtWidgets  # noqa: E402
 
 from pyidi.GUIs.subset_selection import SelectionGUI  # noqa: E402
-from pyidi.selection_geometry import rois_inside_polygon  # noqa: E402
 from pyidi.video_reader import VideoReader  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -117,18 +117,15 @@ def main():
     # register the "Grid 1" list entry, then add vertices one at a time,
     # recomputing the ROI points (and therefore the filled grid) as soon as
     # the polygon has at least 3 vertices.
-    window.grid_list.addItem("Grid 1")
-    window.grid_list.setCurrentRow(0)
-    grid = window.grid_polygons[window.active_grid_index]
+    grid = window.add_selection("grid")
 
     subset_size = window.subset_size_spinbox.value()
     spacing = window.distance_spinbox.value()
 
     for vertex in POLYGON_VERTICES:
-        grid["points"].append(vertex)
-        if len(grid["points"]) >= 3:
-            grid["roi_points"] = rois_inside_polygon(grid["points"], subset_size, spacing)
-        window.update_grid_display()
+        grid["geometry"].append(vertex)
+        window.recompute_entry(grid, subset_size, spacing)
+        window.update_geometry_display()
         window.update_selected_points()
         frames.append(grab_frame(window))
 

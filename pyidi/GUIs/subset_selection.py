@@ -12,6 +12,10 @@ from ..selection_geometry import points_along_polygon, rois_inside_polygon, rois
 #: the same regardless of the current zoom level.
 VERTEX_GRAB_RADIUS_PX = 10
 
+#: Row-label prefix for each non-manual selection-entry kind, used by
+#: ``SelectionGUI.add_selection`` to generate monotonic labels ("Grid 3", ...).
+PRETTY = {'line': 'Line', 'grid': 'Grid', 'brush': 'Brush'}
+
 
 class BrushViewBox(pg.ViewBox):
     def __init__(self, parent_gui, *args, **kwargs):
@@ -23,20 +27,24 @@ class BrushViewBox(pg.ViewBox):
     def _vertex_drag_container(self):
         """Return the (entries, kind) vertex-list container for the active selection method.
 
-        Only the "Grid" and "Along the line" methods support vertex dragging.
+        Only the "Grid" and "Along the line" methods support vertex dragging. The
+        returned ``entries`` list is filtered from ``gui.selections`` but holds the
+        same (mutable) entry dicts, so edits through it are visible in
+        ``gui.selections`` too.
 
-        :return: the list of grid/polygon dicts and a kind tag ("grid" or "polygon"),
-            or (None, None) if the current mode/method does not support vertex dragging.
+        :return: the list of live selection entries of the active kind and a kind
+            tag ("grid" or "line"), or (None, None) if the current mode/method does
+            not support vertex dragging.
         :rtype: tuple
         """
         gui = self.parent_gui
         if gui.mode != "selection":
             return None, None
-        if gui.method_buttons["Grid"].isChecked():
-            return gui.grid_polygons, "grid"
-        if gui.method_buttons["Along the line"].isChecked():
-            return gui.drawing_polygons, "polygon"
-        return None, None
+        kind = gui.current_kind()
+        if kind not in ('grid', 'line'):
+            return None, None
+        entries = [e for e in gui.selections if e['kind'] == kind and e['visible']]
+        return entries, kind
 
     def _start_vertex_drag(self, ev):
         """Hit-test the drag start position against existing vertices; begin a drag if one is hit.
@@ -60,7 +68,7 @@ class BrushViewBox(pg.ViewBox):
             'kind': kind,
             'entry': entry,
             'vertex_index': vertex_idx,
-            'original_position': entry['points'][vertex_idx],
+            'original_position': entry['geometry'][vertex_idx],
         }
         ev.accept()
         return True
@@ -79,11 +87,8 @@ class BrushViewBox(pg.ViewBox):
         pos = ev.scenePos()
         if self.sceneBoundingRect().contains(pos):
             point = self.parent_gui.view.mapSceneToView(pos)
-            drag['entry']['points'][drag['vertex_index']] = (point.x(), point.y())
-            if drag['kind'] == 'grid':
-                self.parent_gui.update_grid_display()
-            else:
-                self.parent_gui.update_polygon_display()
+            drag['entry']['geometry'][drag['vertex_index']] = (point.x(), point.y())
+            self.parent_gui.update_geometry_display()
 
         if ev.isFinish():
             self.parent_gui.push_undo({
@@ -114,7 +119,7 @@ class BrushViewBox(pg.ViewBox):
         return self._continue_vertex_drag(ev)
 
     def mouseClickEvent(self, ev):
-        if self.parent_gui.mode == "selection" and self.parent_gui.method_buttons["Brush"].isChecked():
+        if self.parent_gui.mode == "selection" and self.parent_gui.current_kind() == 'brush':
             if self.parent_gui.ctrl_held:
                 ev.accept()
                 self.parent_gui.handle_brush_start(ev)
@@ -174,7 +179,7 @@ class BrushViewBox(pg.ViewBox):
         :return: True if the event was consumed
         :rtype: bool
         """
-        if not (self.parent_gui.mode == "selection" and self.parent_gui.method_buttons["Brush"].isChecked()):
+        if not (self.parent_gui.mode == "selection" and self.parent_gui.current_kind() == 'brush'):
             return False
         if not self.parent_gui.ctrl_held:
             return False
@@ -263,14 +268,22 @@ class SelectionGUI(QtWidgets.QMainWindow):
         self.setting_direction = False
 
         self.selected_points = []
-        self.manual_points = []
         self.candidate_points = []
-        self.drawing_polygons = [{'points': [], 'roi_points': []}]
-        self.active_polygon_index = 0
-        self.grid_polygons = [{'points': [], 'roi_points': []}]
-        self.active_grid_index = 0
-        self.brush_masks = []  # Store brush masks for recomputation
-        self.brush_points = []  # Store computed brush points separately
+        # The threshold-and-show method of whichever filter produced candidate_points,
+        # so a change to the selection can re-derive them; None when no filter is live.
+        self._candidate_refresh = None
+
+        # Single ordered list of selection entries, replacing the old parallel
+        # manual/line/grid/brush containers -- see add_selection()/entry_points()
+        # for the entry schema. Entries are created lazily on first click/stroke,
+        # so this starts empty (no "always >= 1 placeholder entry" invariant).
+        self.selections = []
+        self.active_index = None    # int index into self.selections, or None
+        self._label_counters = {'manual': 0, 'line': 0, 'grid': 0, 'brush': 0}
+        # Guards against re-entrant QListWidget signal handling: programmatic
+        # setCurrentRow()/setText()/setCheckState() calls set this so the
+        # corresponding currentRowChanged/itemChanged handlers bail out early.
+        self._syncing_list = False
 
         # Add status bar for instructions
         self.statusBar = self.statusBar()
@@ -430,22 +443,53 @@ class SelectionGUI(QtWidgets.QMainWindow):
         self.image_item = ImageItem()
         self.polygon_line = pg.PlotDataItem(pen=pg.mkPen('y', width=2))
         self.polygon_points_scatter = ScatterPlotItem(pen=pg.mkPen(None), brush=pg.mkBrush(255, 255, 0, 200), size=6)
-        self.scatter = ScatterPlotItem(pen=pg.mkPen(None), brush=pg.mkBrush(255, 100, 100, 200), size=8)
+        self.grid_line = pg.PlotDataItem(pen=pg.mkPen('c', width=2))
+        self.grid_points_scatter = ScatterPlotItem(pen=pg.mkPen(None), brush=pg.mkBrush(255, 200, 0, 200), size=6)
         self.roi_overlay = ImageItem()
+        # The subset borders, kept apart from roi_overlay (which carries only the
+        # translucent interior) so they can be stroked with a *cosmetic* pen: its width
+        # is measured in screen pixels rather than image pixels, so the borders stay one
+        # pixel thin however far you zoom in. A raster border cannot go below one image
+        # pixel, which turns into a thick band at high zoom.
+        self.roi_outline = QtWidgets.QGraphicsPathItem()
+        outline_pen = pg.mkPen(0, 255, 0, 150)
+        outline_pen.setCosmetic(True)
+        self.roi_outline.setPen(outline_pen)
+        self.roi_outline.setBrush(pg.mkBrush(None))
+        self.scatter = ScatterPlotItem(pen=pg.mkPen(None), brush=pg.mkBrush(255, 100, 100, 200), size=8)
+        # Highlights the points of the entry currently selected in selection_list,
+        # drawn on top of the plain point scatter. Magenta with no fill: it is the one
+        # strong hue not already taken (green = ROI fill and filter candidates, cyan =
+        # grid outline, yellow = line outline and vertices, salmon = the points
+        # themselves), and unlike a white ring it stays visible against both the dark
+        # and the bright parts of a grayscale frame. No fill so the point underneath
+        # still reads through the ring.
+        self.highlight_scatter = ScatterPlotItem(
+            pen=pg.mkPen(255, 0, 255, 230, width=2), brush=pg.mkBrush(None), size=13
+        )
 
         self.candidate_scatter = ScatterPlotItem(
             pen=pg.mkPen(None),
             brush=pg.mkBrush(0, 255, 0, 200),
             size=6
         )
+        self.brush_overlay = ImageItem()
         self.direction_line = pg.PlotDataItem(pen=pg.mkPen('r', width=2))
 
         self.view.addItem(self.image_item)
         self.view.addItem(self.polygon_line)
         self.view.addItem(self.polygon_points_scatter)
+        self.view.addItem(self.grid_line)
+        self.view.addItem(self.grid_points_scatter)
+        self.roi_overlay.setZValue(1)
         self.view.addItem(self.roi_overlay)  # Add scatter for showing square points
+        self.roi_outline.setZValue(1)
+        self.view.addItem(self.roi_outline)
         self.view.addItem(self.scatter)  # Add scatter for showing points
+        self.view.addItem(self.highlight_scatter)
         self.view.addItem(self.candidate_scatter)
+        self.brush_overlay.setZValue(2)
+        self.view.addItem(self.brush_overlay)
         self.view.addItem(self.direction_line)
 
         self.splitter.addWidget(self.pg_widget)
@@ -738,28 +782,20 @@ class SelectionGUI(QtWidgets.QMainWindow):
         self.brush_deselect_button.clicked.connect(self.activate_brush_deselect)
         method_controls_layout.addWidget(self.brush_deselect_button)
 
-        # Polygon manager (visible only for "Along the line")
-        self.polygon_list = QtWidgets.QListWidget()
-        self.polygon_list.setVisible(False)
-        self.polygon_list.currentRowChanged.connect(self.on_polygon_selected)
-        method_controls_layout.addWidget(self.polygon_list)
+        # Unified list of all selection entries (manual/line/grid/brush), always
+        # visible regardless of the active method -- replaces the separate
+        # polygon_list/grid_list. Each row's checkbox toggles that entry's
+        # visibility; the delete button below removes the current row.
+        self.selection_list = QtWidgets.QListWidget()
+        self.selection_list.setMinimumHeight(120)
+        self.selection_list.currentRowChanged.connect(self.on_entry_selected)
+        self.selection_list.itemChanged.connect(self.on_entry_item_changed)
+        method_controls_layout.addWidget(self.selection_list)
 
-        self.delete_polygon_button = QtWidgets.QPushButton("Delete selected polygon")
-        self.delete_polygon_button.clicked.connect(self.delete_selected_polygon)
-        self.delete_polygon_button.setVisible(False)
-        method_controls_layout.addWidget(self.delete_polygon_button)
+        self.delete_entry_button = QtWidgets.QPushButton("Delete selected")
+        self.delete_entry_button.clicked.connect(self.delete_selected_entry)
+        method_controls_layout.addWidget(self.delete_entry_button)
 
-        # Grid polygon manager
-        self.grid_list = QtWidgets.QListWidget()
-        self.grid_list.setVisible(False)
-        self.grid_list.currentRowChanged.connect(self.on_grid_selected)
-        method_controls_layout.addWidget(self.grid_list)
-
-        self.delete_grid_button = QtWidgets.QPushButton("Delete selected grid")
-        self.delete_grid_button.clicked.connect(self.delete_selected_grid)
-        self.delete_grid_button.setVisible(False)
-        method_controls_layout.addWidget(self.delete_grid_button)
-        
         self.manual_layout.addWidget(method_controls_group)
 
         self.manual_layout.addStretch(1)
@@ -806,6 +842,7 @@ class SelectionGUI(QtWidgets.QMainWindow):
         self.show_points_checkbox.setChecked(False)
         def toggle_points_and_roi(state):
             self.roi_overlay.setVisible(state)
+            self.roi_outline.setVisible(state)
             self.scatter.setVisible(state)
         self.show_points_checkbox.stateChanged.connect(toggle_points_and_roi)
         display_options_layout.addWidget(self.show_points_checkbox)
@@ -937,18 +974,16 @@ class SelectionGUI(QtWidgets.QMainWindow):
     def method_selected(self, id: int):
         method_name = list(self.method_buttons.keys())[id]
         # print(f"Selected method: {method_name}")
-        is_along = method_name == "Along the line"
-        is_grid = method_name == "Grid"
-        is_brush = method_name == "Brush"
+        kind = self.current_kind()
+        self._reactivate_last_entry_of_kind(kind)
+        is_along = kind == 'line'
+        is_grid = kind == 'grid'
+        is_brush = kind == 'brush'
 
         show_spacing = is_along or is_grid or is_brush
 
         self.start_new_line_button.setVisible(is_along or is_grid)
         self.start_new_line_button.setText("Start new grid" if is_grid else "Start new line")
-        self.polygon_list.setVisible(is_along)
-        self.delete_polygon_button.setVisible(is_along)
-        self.grid_list.setVisible(is_grid)
-        self.delete_grid_button.setVisible(is_grid)
 
         self.distance_widget.setVisible(show_spacing)
         self.distance_slider.setVisible(show_spacing)
@@ -994,7 +1029,9 @@ class SelectionGUI(QtWidgets.QMainWindow):
                 self.direction_line.clear()
 
             self.roi_overlay.setVisible(True)
+            self.roi_outline.setVisible(True)
             self.scatter.setVisible(True)
+            self.highlight_scatter.setVisible(True)
             self.show_instruction("Selection mode: choose a method on the left.")
 
         elif mode == "filter":
@@ -1005,32 +1042,467 @@ class SelectionGUI(QtWidgets.QMainWindow):
             # Don't automatically compute anything - let user select method first
             self.show_points_checkbox.setChecked(False)
             self.roi_overlay.setVisible(False)
+            self.roi_outline.setVisible(False)
             self.scatter.setVisible(False)
+            # The active entry's highlight belongs to Select mode; leaving it on would
+            # ring points that are no longer drawn.
+            self.highlight_scatter.setVisible(False)
             self.show_instruction("Filter mode: choose a filter method and adjust settings.")
 
     def on_mouse_click(self, event):
         if self.mode == "filter":
             return
-        
-        if self.method_buttons["Manual"].isChecked():
+
+        kind = self.current_kind()
+        if kind == 'manual':
             self.handle_manual_selection(event)
-        elif self.method_buttons["Along the line"].isChecked():
+        elif kind == 'line':
             self.handle_polygon_drawing(event)
-        elif self.method_buttons["Grid"].isChecked():
+        elif kind == 'grid':
             self.handle_grid_drawing(event)
+        elif kind == 'brush':
+            self.handle_brush_start(event)
         elif self.method_buttons["Remove point"].isChecked():
             self.handle_remove_point(event)
-        elif self.method_buttons["Brush"].isChecked():
-            self.handle_brush_start(event)
+
+    # ------------------------------------------------------------------
+    # Selection-entry core helpers
+    #
+    # All selections (manual points, "along the line" polylines, grid
+    # polygons, brush strokes) live in one ordered list, self.selections,
+    # instead of four separate parallel containers. Each entry is a dict;
+    # see the module-level PRETTY dict and add_selection() below for the
+    # label scheme and entry schema.
+    # ------------------------------------------------------------------
+    def current_kind(self):
+        """Return the selection-entry kind for the currently-checked method button.
+
+        :return: ``'grid'``, ``'manual'``, ``'line'`` or ``'brush'`` for the
+            correspondingly-checked method button; ``None`` if "Remove point" is
+            checked (it has no entry kind of its own) or if no button is checked.
+        :rtype: str or None
+        """
+        button_names = {'Grid': 'grid', 'Manual': 'manual', 'Along the line': 'line', 'Brush': 'brush'}
+        for name, kind in button_names.items():
+            if self.method_buttons[name].isChecked():
+                return kind
+        return None
+
+    def add_selection(self, kind, geometry=None, label=None, make_active=True):
+        """Append a new entry of `kind`, register its list row, and return the entry dict.
+
+        This is the entry point used both by the click/stroke handlers below and by
+        external callers (tests, the docs animation script) that want to build up a
+        selection programmatically.
+
+        :param kind: ``'manual'``, ``'line'``, ``'grid'`` or ``'brush'``
+        :type kind: str
+        :param geometry: initial geometry for the entry; defaults to ``[]`` for
+            manual/line/grid. Brush entries are always created with a real mask, so
+            leaving this ``None`` for ``kind='brush'`` is a programming error.
+        :type geometry: list or numpy.ndarray or None
+        :param label: explicit row label; if omitted, one is generated from the
+            per-kind monotonic counter (see the class/module docstring)
+        :type label: str or None
+        :param make_active: whether to make the new entry the active one and select
+            its row in ``selection_list``
+        :type make_active: bool
+        :return: the newly created entry dict
+        :rtype: dict
+        :raises ValueError: if ``kind == 'brush'`` and ``geometry`` is ``None``
+        """
+        if geometry is None:
+            if kind == 'brush':
+                raise ValueError("add_selection('brush', ...) requires an explicit mask.")
+            geometry = []
+        if label is None:
+            self._label_counters[kind] += 1
+            label = 'Manual' if kind == 'manual' else f'{PRETTY[kind]} {self._label_counters[kind]}'
+        entry = {
+            'kind': kind,
+            'label': label,
+            'geometry': geometry,
+            'roi_points': [],
+            'removed': set(),
+            'visible': True,
+        }
+        self.selections.append(entry)
+        row = len(self.selections) - 1
+        self._insert_row(row, entry)
+        if make_active:
+            self.active_index = row
+            self._syncing_list = True
+            self.selection_list.setCurrentRow(row)
+            self._syncing_list = False
+        return entry
+
+    def _reactivate_last_entry_of_kind(self, kind):
+        """Make the most recent entry of `kind` active, if the active one is not already.
+
+        There is a single ``active_index`` for all kinds, where the pre-list code kept a
+        separate active index per kind. Without this, switching away from Grid (say, to
+        drop a manual point) and back would leave a non-grid entry active, so the next
+        click would start a *new* grid instead of continuing the one being drawn. Nothing
+        happens when the active entry is already of `kind` -- that is what keeps clicking
+        a specific row in ``selection_list`` from being overridden by this.
+
+        :param kind: the entry kind the tool has just switched to, or None for
+            "Remove point" (which owns no entries and leaves the active one alone)
+        :type kind: str or None
+        """
+        if kind is None or self.active_entry(kind) is not None:
+            return
+        last = next((i for i in reversed(range(len(self.selections)))
+                     if self.selections[i]['kind'] == kind), None)
+        if last is None:
+            return
+        self.active_index = last
+        self._syncing_list = True
+        self.selection_list.setCurrentRow(last)
+        self._syncing_list = False
+        self.update_highlight()
+
+    def active_entry(self, kind=None):
+        """Return the active selection entry, or None.
+
+        :param kind: if given, only return the active entry when its kind matches
+        :type kind: str or None
+        :return: the active entry dict, or None if there is no active entry (or its
+            kind does not match `kind`)
+        :rtype: dict or None
+        """
+        if self.active_index is None or not (0 <= self.active_index < len(self.selections)):
+            return None
+        entry = self.selections[self.active_index]
+        if kind is not None and entry['kind'] != kind:
+            return None
+        return entry
+
+    def entry_points(self, entry):
+        """The entry's contributed points: roi_points minus its `removed` set, order preserved.
+
+        :param entry: a selection entry dict
+        :type entry: dict
+        :return: the entry's live points, in ``roi_points`` order
+        :rtype: list[tuple]
+        """
+        return [p for p in entry['roi_points'] if tuple(p) not in entry['removed']]
+
+    def _brush_points(self, mask, subset_size, spacing):
+        """ROI points inside a brush mask, returned as (x, y).
+
+        ``mask`` is ``(n_x, n_y)`` indexed ``[x, y]`` (see ``handle_brush_move``),
+        but ``rois_inside_mask`` documents and assumes ``mask[y, x]`` and returns
+        ``(y, x)``. Transpose ``mask`` in, then flip the result back to ``(x, y)``
+        out. Passing the mask untransposed happened to give correct *coordinates*
+        (the two transpositions canceled) but transposed the *per-axis grid step*,
+        so anisotropic subsets got the row/column spacing swapped -- fixed here.
+
+        :param mask: boolean brush mask, ``(n_x, n_y)`` indexed ``[x, y]``
+        :type mask: numpy.ndarray
+        :param subset_size: ``(height, width)`` subset size
+        :type subset_size: tuple
+        :param spacing: extra spacing added to the subset size to get the grid step
+        :type spacing: int
+        :return: ``(x, y)`` ROI points inside the mask
+        :rtype: list[tuple]
+        """
+        return [(x, y) for (y, x) in rois_inside_mask(mask.T, subset_size, spacing)]
+
+    def recompute_entry(self, entry, subset_size=None, spacing=None):
+        """Recompute `entry['roi_points']` from its geometry, in place.
+
+        ``entry['removed']`` is deliberately NOT cleared here -- that is what lets
+        removed points survive a spacing/subset-size change (see ``entry_points``).
+
+        :param entry: the selection entry to recompute
+        :type entry: dict
+        :param subset_size: ``(height, width)`` subset size; defaults to
+            ``self.get_subset_size()``
+        :type subset_size: tuple or None
+        :param spacing: spacing between subsets; defaults to
+            ``self.distance_spinbox.value()``
+        :type spacing: int or None
+        """
+        if subset_size is None:
+            subset_size = self.get_subset_size()
+        if spacing is None:
+            spacing = self.distance_spinbox.value()
+
+        kind, geom = entry['kind'], entry['geometry']
+        if kind == 'manual':
+            entry['roi_points'] = list(geom)  # no recompute; points are literal
+        elif kind == 'line':
+            entry['roi_points'] = points_along_polygon(geom, subset_size, spacing) if len(geom) >= 2 else []
+        elif kind == 'grid':
+            entry['roi_points'] = rois_inside_polygon(geom, subset_size, spacing) if len(geom) >= 3 else []
+        elif kind == 'brush':
+            entry['roi_points'] = self._brush_points(geom, subset_size, spacing)
+
+    def _insert_row(self, row, entry):
+        """Insert a checkable QListWidgetItem for `entry` at `row` in `selection_list`.
+
+        :param row: row index to insert at
+        :type row: int
+        :param entry: the selection entry the row represents
+        :type entry: dict
+        """
+        item = QtWidgets.QListWidgetItem(f"{entry['label']} — {len(self.entry_points(entry))} pts")
+        item.setFlags(item.flags() | QtCore.Qt.ItemFlag.ItemIsUserCheckable)
+        self._syncing_list = True
+        item.setCheckState(QtCore.Qt.CheckState.Checked if entry['visible'] else QtCore.Qt.CheckState.Unchecked)
+        self.selection_list.insertItem(row, item)
+        self._syncing_list = False
+
+    def refresh_row_labels(self):
+        """Refresh every row's text and checkbox from its entry's current state.
+
+        Guarded by ``_syncing_list`` so the ``setText``/``setCheckState`` calls
+        below do not re-trigger ``on_entry_item_changed``.
+        """
+        self._syncing_list = True
+        for row, entry in enumerate(self.selections):
+            item = self.selection_list.item(row)
+            if item is None:
+                continue
+            item.setText(f"{entry['label']} — {len(self.entry_points(entry))} pts")
+            item.setCheckState(QtCore.Qt.CheckState.Checked if entry['visible'] else QtCore.Qt.CheckState.Unchecked)
+        self._syncing_list = False
+
+    def on_entry_item_changed(self, item):
+        """Sync an entry's `visible` flag from its row's checkbox state.
+
+        :param item: the changed ``QListWidgetItem``
+        :type item: QtWidgets.QListWidgetItem
+        """
+        if self._syncing_list:
+            return
+        row = self.selection_list.row(item)
+        if 0 <= row < len(self.selections):
+            self.selections[row]['visible'] = item.checkState() == QtCore.Qt.CheckState.Checked
+            self.update_geometry_display()
+            self.update_selected_points()
+
+    def on_entry_selected(self, row):
+        """Handle a row becoming the current row in `selection_list`.
+
+        Switches the active tool to the row's kind, so its vertices become
+        immediately editable (drag/undo), and refreshes the display.
+
+        :param row: the new current row, or -1 if the selection was cleared
+        :type row: int
+        """
+        if self._syncing_list:
+            return
+        if not (0 <= row < len(self.selections)):
+            self.active_index = None
+            self.update_geometry_display()
+            self.update_selected_points()
+            return
+
+        self.active_index = row
+        kind = self.selections[row]['kind']
+        button_name = {'grid': 'Grid', 'line': 'Along the line', 'manual': 'Manual', 'brush': 'Brush'}[kind]
+        button = self.method_buttons[button_name]
+        if not button.isChecked():
+            button.setChecked(True)
+            self.method_selected(self.button_group.id(button))
+        self.update_geometry_display()
+        self.update_selected_points()
+
+    def delete_selected_entry(self):
+        """Delete the currently-selected row/entry (any kind), pushing an undo action."""
+        row = self.selection_list.currentRow()
+        if row < 0:
+            return
+        entry = self.selections[row]
+        self.push_undo({
+            'type': 'delete', 'kind': entry['kind'], 'entry': entry, 'row': row, 'label': entry['label'],
+        })
+        del self.selections[row]
+        self.selection_list.takeItem(row)
+        self.active_index = min(row, len(self.selections) - 1) if self.selections else None
+        if self.active_index is not None:
+            self._syncing_list = True
+            self.selection_list.setCurrentRow(self.active_index)
+            self._syncing_list = False
+        self.update_geometry_display()
+        self.update_selected_points()
+
+    def update_highlight(self):
+        """Highlight the active entry's points on top of the plain point scatter."""
+        entry = self.active_entry()
+        if entry is None or not entry['visible']:
+            self.highlight_scatter.clear()
+            return
+        pts = self.entry_points(entry)
+        if not pts:
+            self.highlight_scatter.clear()
+            return
+        # Size/pen/brush come from the item's own defaults (see ui_graphics).
+        self.highlight_scatter.setData(pos=np.array(pts) + 0.5, symbol='o')
+
+    def _line_display_data(self):
+        """Build nan-separated OPEN polyline coordinates and vertex list for 'line' entries.
+
+        :return: ``(xs, ys, all_points)`` -- flattened, nan-separated polyline
+            coordinates and the flat list of all vertices, for every visible
+            ``line`` entry
+        :rtype: tuple
+        """
+        xs, ys, all_points = [], [], []
+        for entry in self.selections:
+            if entry['kind'] != 'line' or not entry['visible']:
+                continue
+            path = entry['geometry']
+            all_points.extend(path)
+            if len(path) >= 2:
+                xs.extend([p[0] for p in path] + [np.nan])
+                ys.extend([p[1] for p in path] + [np.nan])
+            elif len(path) == 1:
+                xs.extend([path[0][0], path[0][0], np.nan])
+                ys.extend([path[0][1], path[0][1], np.nan])
+        return xs, ys, all_points
+
+    def _grid_display_data(self):
+        """Build nan-separated CLOSED polygon coordinates and vertex list for 'grid' entries.
+
+        :return: ``(xs, ys, all_points)`` -- flattened, nan-separated closed-polygon
+            coordinates and the flat list of all vertices, for every visible
+            ``grid`` entry
+        :rtype: tuple
+        """
+        xs, ys, all_points = [], [], []
+        for entry in self.selections:
+            if entry['kind'] != 'grid' or not entry['visible']:
+                continue
+            path = entry['geometry']
+            all_points.extend(path)
+            if len(path) >= 2:
+                xs.extend([p[0] for p in path] + [path[0][0], np.nan])  # Close polygon
+                ys.extend([p[1] for p in path] + [path[0][1], np.nan])
+            elif len(path) == 1:
+                xs.extend([path[0][0], path[0][0], np.nan])
+                ys.extend([path[0][1], path[0][1], np.nan])
+        return xs, ys, all_points
+
+    def update_geometry_display(self):
+        """Redraw the line/grid outlines and vertex scatters from `self.selections`.
+
+        Walks ``self.selections`` once per kind and builds the four display
+        datasets (line outline + vertices, grid outline + vertices), skipping
+        entries with ``visible == False``.
+        """
+        line_xs, line_ys, line_points = self._line_display_data()
+        self.polygon_line.setData(line_xs, line_ys)
+        self.polygon_points_scatter.setData(pos=line_points)
+
+        grid_xs, grid_ys, grid_points = self._grid_display_data()
+        self.grid_line.setData(grid_xs, grid_ys)
+        self.grid_points_scatter.setData(pos=grid_points)
+
+        self.update_highlight()
+
+    def clear_subset_rectangles(self):
+        """Remove both halves of the subset-rectangle display."""
+        self.roi_overlay.clear()
+        self.roi_outline.setPath(QtGui.QPainterPath())
+
+    def draw_subset_rectangles(self, points, half_h, half_w):
+        """Draw a rectangle around each point, as a raster fill plus a hairline border.
+
+        The two halves are drawn by different means because each is cheap in a
+        different way. The translucent interior goes into ``roi_overlay`` as a single
+        RGBA image, which costs one upload no matter how many subsets there are. The
+        borders go into ``roi_outline`` as one QPainterPath stroked with a cosmetic
+        pen, whose width is in *screen* pixels: that is what makes them a hairline at
+        any zoom. Drawing the borders into the raster instead, as this used to, pins
+        them to one *image* pixel, which is a thick band as soon as you zoom in.
+
+        Both are built with whole-array numpy rather than a Python loop over the
+        points, which is what keeps the redraw quick for tens of thousands of subsets.
+
+        :param points: the subset centres, as an ``(n, 2)`` array of real ``(x, y)``
+            = (column, row) image coordinates
+        :type points: numpy.ndarray
+        :param half_h: half the subset height, in pixels (``subset_h // 2``)
+        :type half_h: int
+        :param half_w: half the subset width, in pixels (``subset_w // 2``)
+        :type half_w: int
+        """
+        # image_item.image / roi_overlay are column-major (pyqtgraph's default
+        # axisOrder): array axis 0 is the image's x/width axis, axis 1 is its y/height
+        # axis. half_w therefore pairs with axis 0 and half_h with axis 1.
+        n_x, n_y = self.image_item.image.shape[:2]
+        w_x, w_y = 2 * half_w + 1, 2 * half_h + 1
+
+        ix0 = np.rint(points[:, 0]).astype(int) - half_w
+        iy0 = np.rint(points[:, 1]).astype(int) - half_h
+        # A subset whose rectangle would reach past the image edge is not drawn at all.
+        inside = (ix0 >= 0) & (iy0 >= 0) & (ix0 + w_x < n_x) & (iy0 + w_y < n_y)
+        ix0, iy0 = ix0[inside], iy0[inside]
+
+        if not len(ix0):
+            self.clear_subset_rectangles()
+            return
+
+        # Fill: mark every covered pixel at once by broadcasting the per-subset pixel
+        # index ranges against each other, giving an (n, w_x, w_y) index into the mask.
+        covered = np.zeros((n_x, n_y), dtype=bool)
+        covered[(ix0[:, None] + np.arange(w_x))[:, :, None],
+                (iy0[:, None] + np.arange(w_y))[:, None, :]] = True
+        overlay = np.zeros((n_x, n_y, 4), dtype=np.uint8)  # RGBA
+        overlay[..., 1] = covered * np.uint8(180)   # green
+        overlay[..., 3] = covered * np.uint8(40)    # alpha
+        self.roi_overlay.setImage(overlay, autoLevels=False)
+        self.roi_overlay.setZValue(1)
+
+        # Border: five corners per rectangle (the first repeated to close it) separated
+        # by a nan, which is how arrayToQPath is told to start a new sub-path.
+        x0, y0 = ix0.astype(float), iy0.astype(float)
+        x1, y1 = x0 + w_x, y0 + w_y
+        xs = np.empty((len(x0), 6))
+        ys = np.empty((len(y0), 6))
+        xs[:, 0] = xs[:, 3] = xs[:, 4] = x0
+        xs[:, 1] = xs[:, 2] = x1
+        ys[:, 0] = ys[:, 1] = ys[:, 4] = y0
+        ys[:, 2] = ys[:, 3] = y1
+        xs[:, 5] = ys[:, 5] = np.nan
+        self.roi_outline.setPath(pg.arrayToQPath(xs.ravel(), ys.ravel(), connect='finite'))
+
+    def refresh_candidates_for_selection(self):
+        """Re-derive the filter candidates from what is currently selected.
+
+        The Filter-mode filters score the subsets placed in Select mode, so their
+        result goes stale the moment one of those subsets disappears -- painted over
+        with the brush in deselect mode, clicked away with "Remove point", or removed
+        by deleting or unchecking a row. A stale candidate was not merely drawn in the
+        wrong place: ``get_points()`` returns the candidates whenever a filter has been
+        run, so a deselected subset stayed in the returned points.
+
+        The cached per-subset scores are deliberately kept, so this is reversible:
+        re-checking a row, or undoing its deletion, brings its candidates back without
+        re-running the filter.
+        """
+        if self._candidate_refresh is not None:
+            self._candidate_refresh()
 
     def update_selected_points(self):
-        polygon_points = [pt for poly in self.drawing_polygons for pt in poly['roi_points']]
-        grid_points = [pt for g in self.grid_polygons for pt in g['roi_points']]
-        self.selected_points = self.manual_points + polygon_points + grid_points + self.brush_points
+        # Order is creation order across all kinds (manual/line/grid/brush mixed
+        # together as entries were added) -- a deliberate change from the old
+        # manual+line+grid+brush concatenation order.
+        self.selected_points = []
+        for entry in self.selections:
+            if entry['visible']:
+                self.selected_points.extend(self.entry_points(entry))
+
+        self.refresh_candidates_for_selection()
 
         if not self.selected_points:
             self.scatter.clear()
-            self.roi_overlay.clear()
+            self.clear_subset_rectangles()
+            self.refresh_row_labels()
+            self.update_highlight()
             return
 
         subset_h, subset_w = self.get_subset_size()
@@ -1042,43 +1514,9 @@ class SelectionGUI(QtWidgets.QMainWindow):
 
         # --- Rectangles ---
         if self.show_roi_checkbox.isChecked():
-            # image_item.image / roi_overlay are column-major (pyqtgraph's default
-            # axisOrder): array axis 0 is the image's x/width axis, axis 1 is its
-            # y/height axis.
-            n_x, n_y = self.image_item.image.shape[:2]
-            overlay = np.zeros((n_x, n_y, 4), dtype=np.uint8)  # RGBA
-
-            for px, py in selected_points:
-                # px, py are the point's real (x, y) = (column, row); half_w pairs
-                # with array axis 0 (x), half_h with array axis 1 (y).
-                ix0 = int(round(px - half_w))
-                iy0 = int(round(py - half_h))
-                ix1 = int(round(px + half_w+1))
-                iy1 = int(round(py + half_h+1))
-
-                # Ensure bounds
-                if ix0 < 0 or iy0 < 0 or ix1 >= n_x or iy1 >= n_y:
-                    continue
-
-                # Fill interior (semi-transparent green)
-                overlay[ix0:ix1, iy0:iy1, 1] = 180  # green
-                overlay[ix0:ix1, iy0:iy1, 3] = 40   # alpha
-
-                # Outline (more opaque green)
-                overlay[ix0, iy0:iy1, 1] = 255  # left
-                overlay[ix1 - 1, iy0:iy1, 1] = 255  # right
-                overlay[ix0:ix1, iy0, 1] = 255  # top
-                overlay[ix0:ix1, iy1 - 1, 1] = 255  # bottom
-
-                overlay[ix0, iy0:iy1, 3] = 150
-                overlay[ix1 - 1, iy0:iy1, 3] = 150
-                overlay[ix0:ix1, iy0, 3] = 150
-                overlay[ix0:ix1, iy1 - 1, 3] = 150
-
-            self.roi_overlay.setImage(overlay, autoLevels=False)
-            self.roi_overlay.setZValue(1)
+            self.draw_subset_rectangles(selected_points, half_h, half_w)
         else:
-            self.roi_overlay.clear()
+            self.clear_subset_rectangles()
 
         # --- Center Dots ---
         self.scatter.setData(
@@ -1089,6 +1527,8 @@ class SelectionGUI(QtWidgets.QMainWindow):
             pen=pg.mkPen(None)
         )
         self.points_label.setText(f"Selected subsets: {len(self.selected_points)}")
+        self.refresh_row_labels()
+        self.update_highlight()
 
     def update_distance_from_slider(self, value):
         """Update distance spinbox from slider value and recompute ROI points."""
@@ -1113,42 +1553,17 @@ class SelectionGUI(QtWidgets.QMainWindow):
     def recompute_roi_points(self):
         subset_size = self.get_subset_size()
         spacing = self.distance_spinbox.value()
-
-        # Update all "along the line" polygons
-        for poly in self.drawing_polygons:
-            if len(poly['points']) >= 2:
-                poly['roi_points'] = points_along_polygon(poly['points'], subset_size, spacing)
-
-        # Update all "grid" polygons
-        for grid in self.grid_polygons:
-            if len(grid['points']) >= 3:
-                grid['roi_points'] = rois_inside_polygon(grid['points'], subset_size, spacing)
-
-        # Update all brush masks
-        self.brush_points = []
-        for mask in self.brush_masks:
-            self.brush_points.extend(rois_inside_mask(mask, subset_size, spacing))
-
+        for entry in self.selections:
+            self.recompute_entry(entry, subset_size, spacing)
         self.update_selected_points()
 
     def start_new_line(self):
         # print("Starting a new line...")
-
-        if self.method_buttons["Along the line"].isChecked():
-            self.drawing_polygons.append({'points': [], 'roi_points': []})
-            self.active_polygon_index = len(self.drawing_polygons) - 1
-            self.polygon_list.addItem(f"Polygon {self.active_polygon_index + 1}")
-            self.polygon_list.setCurrentRow(self.active_polygon_index)
-            self.update_polygon_display()
-
-        elif self.method_buttons["Grid"].isChecked():
-            self.grid_polygons.append({'points': [], 'roi_points': []})
-            self.active_grid_index = len(self.grid_polygons) - 1
-            self.grid_list.addItem(f"Grid {self.active_grid_index + 1}")
-            self.grid_list.setCurrentRow(self.active_grid_index)    
-            self.update_grid_display()
-
-        self.update_selected_points()
+        kind = self.current_kind()
+        if kind in ('grid', 'line'):
+            self.add_selection(kind)
+            self.update_geometry_display()
+            self.update_selected_points()
 
     def clear_selection(self):
         # print("Clearing selections...")
@@ -1157,42 +1572,20 @@ class SelectionGUI(QtWidgets.QMainWindow):
         # so they would no longer apply consistently after a full clear.
         self.undo_stack = []
 
-        # Clear manual points
-        self.manual_points = []
-
-        # Clear brush data
-        self.brush_masks = []
-        self.brush_points = []
-
-        # Clear line-based polygons
-        self.drawing_polygons = [{'points': [], 'roi_points': []}]
-        self.polygon_list.clear()
-        self.polygon_list.addItem("Polygon 1")
-        self.polygon_list.setCurrentRow(0)
-        self.active_polygon_index = 0
-        self.polygon_line.clear()
-        self.polygon_points_scatter.clear()
-
-        # Clear grid-based polygons
-        self.grid_polygons = [{'points': [], 'roi_points': []}]
-        self.grid_list.clear()
-        self.grid_list.addItem("Grid 1")
-        self.grid_list.setCurrentRow(0)
-        self.active_grid_index = 0
-
-        if hasattr(self, 'grid_line'):
-            self.grid_line.clear()
-        if hasattr(self, 'grid_points_scatter'):
-            self.grid_points_scatter.clear()
-
-        # Clear selected points and visual overlays
+        self.selections = []
+        self.active_index = None
+        self._label_counters = {k: 0 for k in self._label_counters}
+        self.selection_list.clear()
         self.selected_points = []
 
-        if hasattr(self, 'scatter'):
-            self.scatter.clear()
-        if hasattr(self, 'roi_overlay'):
-            self.roi_overlay.clear()
-        
+        self.polygon_line.clear()
+        self.polygon_points_scatter.clear()
+        self.grid_line.clear()
+        self.grid_points_scatter.clear()
+        self.highlight_scatter.clear()
+        self.scatter.clear()
+        self.clear_subset_rectangles()
+
         # Clear candidate points from automatic filtering
         self.clear_candidates()
 
@@ -1281,7 +1674,9 @@ class SelectionGUI(QtWidgets.QMainWindow):
         Searches across ALL entries in the container (not only the active one), so a
         vertex of any grid/polyline can be grabbed and dragged.
 
-        :param entries: list of dicts with a 'points' key, e.g. ``self.grid_polygons``
+        :param entries: list of selection entries (dicts with a 'geometry' key),
+            filtered to the active kind -- see
+            ``BrushViewBox._vertex_drag_container``
         :type entries: list[dict]
         :param x: query x coordinate in view/data units
         :type x: float
@@ -1293,92 +1688,54 @@ class SelectionGUI(QtWidgets.QMainWindow):
         """
         best_entry_idx, best_vertex_idx, best_dist = None, None, None
         for entry_idx, entry in enumerate(entries):
-            idx, dist = self.nearest_vertex(entry['points'], x, y)
+            idx, dist = self.nearest_vertex(entry['geometry'], x, y)
             if idx is None or dist > VERTEX_GRAB_RADIUS_PX:
                 continue
             if best_dist is None or dist < best_dist:
                 best_entry_idx, best_vertex_idx, best_dist = entry_idx, idx, dist
         return best_entry_idx, best_vertex_idx
 
-    # Undo stack (add vertex / move vertex / delete grid or polyline)
+    # Undo stack (add vertex / move vertex / delete a selection entry)
     def push_undo(self, action):
         """Push an action onto the bounded undo stack.
 
         :param action: description of the action; must include a 'type' key
-            ('add', 'move' or 'delete') and a 'kind' key ('grid' or 'polygon')
+            ('add', 'move' or 'delete') and a 'kind' key (the entry's kind --
+            'grid', 'line', 'manual' or 'brush')
         :type action: dict
         """
         self.undo_stack.append(action)
         if len(self.undo_stack) > self.undo_stack_limit:
             self.undo_stack.pop(0)
 
-    def undo_targets(self, kind):
-        """Return the container, list widget, active-index attribute name and display
-        refresh function for the given undo action kind.
-
-        :param kind: 'grid' or 'polygon'
-        :type kind: str
-        :rtype: tuple
-        """
-        if kind == 'grid':
-            return self.grid_polygons, self.grid_list, 'active_grid_index', self.update_grid_display
-        return self.drawing_polygons, self.polygon_list, 'active_polygon_index', self.update_polygon_display
-
     def undo(self):
         """Undo the most recent undoable action.
 
-        Covers adding a vertex, moving a vertex, and deleting a grid or polyline.
-        Manual points, brush strokes and filter results are not undoable. A no-op
-        when the undo stack is empty.
+        Covers adding a vertex, moving a vertex, and deleting a selection entry --
+        of any kind, since delete is generic now (manual and brush entries are
+        undoable too, which they were not before). Filter results are not
+        undoable. A no-op when the undo stack is empty.
         """
         if not self.undo_stack:
             return
 
         action = self.undo_stack.pop()
-        entries, list_widget, active_attr, display_fn = self.undo_targets(action['kind'])
 
         if action['type'] == 'add':
-            points = action['entry']['points']
-            idx = action['vertex_index']
-            if 0 <= idx < len(points):
-                del points[idx]
+            del action['entry']['geometry'][action['vertex_index']]
         elif action['type'] == 'move':
-            points = action['entry']['points']
-            idx = action['vertex_index']
-            if 0 <= idx < len(points):
-                points[idx] = action['original_position']
+            action['entry']['geometry'][action['vertex_index']] = action['original_position']
         elif action['type'] == 'delete':
-            self._undo_delete(action, entries, list_widget, active_attr)
+            row = min(action['row'], len(self.selections))
+            self.selections.insert(row, action['entry'])
+            self._insert_row(row, action['entry'])
+            self.active_index = row
+            self._syncing_list = True
+            self.selection_list.setCurrentRow(row)
+            self._syncing_list = False
 
-        display_fn()
+        self.update_geometry_display()
         self.recompute_roi_points()
-
-    def _undo_delete(self, action, entries, list_widget, active_attr):
-        """Restore a deleted grid/polyline entry at its original row and label.
-
-        If the deletion emptied the container, a placeholder entry was auto-inserted
-        to preserve the "always at least one entry" invariant; that placeholder is
-        removed first so the restore does not leave a stray empty extra entry.
-
-        :param action: the 'delete' undo action being restored
-        :type action: dict
-        :param entries: the live container to restore into (``grid_polygons`` or
-            ``drawing_polygons``)
-        :type entries: list[dict]
-        :param list_widget: the corresponding QListWidget
-        :type list_widget: QtWidgets.QListWidget
-        :param active_attr: name of the active-index attribute to update
-        :type active_attr: str
-        """
-        if action.get('was_only_entry') and len(entries) == 1:
-            del entries[0]
-            list_widget.takeItem(0)
-
-        row = min(action['row'], len(entries))
-        entries.insert(row, action['entry'])
-        list_widget.insertItem(row, action['label'])
-        setattr(self, active_attr, row)
-        list_widget.setCurrentRow(row)
 
     # Grid selection
     def handle_grid_drawing(self, event):
@@ -1387,92 +1744,22 @@ class SelectionGUI(QtWidgets.QMainWindow):
             mouse_point = self.view.mapSceneToView(pos)
             x, y = mouse_point.x(), mouse_point.y()
 
-            # Add first grid polygon to the list if not yet shown
-            if self.grid_list.count() == 0:
-                self.grid_list.addItem("Grid 1")
-                self.grid_list.setCurrentRow(0)
-
-            grid = self.grid_polygons[self.active_grid_index]
+            grid = self.active_entry('grid')
+            if grid is None:
+                grid = self.add_selection('grid')
 
             # Clicking on an existing vertex is a no-op (dragging is used to move it).
-            if self.vertex_within_grab_radius(grid['points'], x, y) is not None:
+            if self.vertex_within_grab_radius(grid['geometry'], x, y) is not None:
                 return
 
-            grid['points'].append((x, y))
+            grid['geometry'].append((x, y))
             self.push_undo({
-                'type': 'add', 'kind': 'grid', 'entry': grid, 'vertex_index': len(grid['points']) - 1
+                'type': 'add', 'kind': 'grid', 'entry': grid, 'vertex_index': len(grid['geometry']) - 1
             })
 
-            # Compute ROI points only if closed polygon
-            if len(grid['points']) >= 3:
-                subset_size = self.get_subset_size()
-                spacing = self.distance_spinbox.value()
-                grid['roi_points'] = rois_inside_polygon(grid['points'], subset_size, spacing)
-
-            self.update_grid_display()
-            self.update_selected_points()
-
-    def on_grid_selected(self, index):
-        if 0 <= index < len(self.grid_polygons):
-            self.active_grid_index = index
-
-    def delete_selected_grid(self):
-        row = self.grid_list.currentRow()
-        if row < 0:
-            return
-
-        self.push_undo({
-            'type': 'delete', 'kind': 'grid', 'entry': self.grid_polygons[row], 'row': row,
-            'label': self.grid_list.item(row).text(), 'was_only_entry': len(self.grid_polygons) == 1,
-        })
-
-        del self.grid_polygons[row]
-        self.grid_list.takeItem(row)
-
-        if not self.grid_polygons:
-            # Preserve the invariant that there is always at least one entry to draw into.
-            self.grid_polygons = [{'points': [], 'roi_points': []}]
-            self.grid_list.addItem("Grid 1")
-            self.active_grid_index = 0
-        else:
-            self.active_grid_index = max(0, row - 1)
-
-        self.grid_list.setCurrentRow(self.active_grid_index)
-        self.update_grid_display()
-        self.update_selected_points()
-
-    def update_grid_display(self):
-        # Combine all points from all grid polygons for scatter
-        all_pts = [pt for poly in self.grid_polygons for pt in poly['points']]
-        
-        # Create or update scatter plot for grid polygon vertices
-        if not hasattr(self, 'grid_points_scatter'):
-            self.grid_points_scatter = ScatterPlotItem(
-                pen=pg.mkPen(None),
-                brush=pg.mkBrush(255, 200, 0, 200),
-                size=6
-            )
-            self.view.addItem(self.grid_points_scatter)
-        self.grid_points_scatter.setData(pos=all_pts)
-
-        # Combine all polygon outlines with np.nan-separated segments
-        xs, ys = [], []
-        for poly in self.grid_polygons:
-            path = poly['points']
-            if len(path) >= 2:
-                xs.extend([p[0] for p in path] + [path[0][0], np.nan])  # Close polygon
-                ys.extend([p[1] for p in path] + [path[0][1], np.nan])
-            elif len(path) == 1:
-                xs.extend([path[0][0], path[0][0], np.nan])
-                ys.extend([path[0][1], path[0][1], np.nan])
-
-        # Create or update line plot for polygon outlines
-        if not hasattr(self, 'grid_line'):
-            self.grid_line = pg.PlotDataItem(
-                pen=pg.mkPen('c', width=2)  # Cyan line
-            )
-            self.view.addItem(self.grid_line)
-        self.grid_line.setData(xs, ys)
+            self.recompute_entry(grid)
+            self.update_geometry_display()
+            self.update_selected_points()  # also refreshes this row's "N pts" label
 
     # Manual selection
     def handle_manual_selection(self, event):
@@ -1481,9 +1768,17 @@ class SelectionGUI(QtWidgets.QMainWindow):
         if self.view.sceneBoundingRect().contains(pos):
             mouse_point = self.view.mapSceneToView(pos)
             x, y = mouse_point.x(), mouse_point.y()
-            x_int, y_int = round(x-0.5), round(y-0.5)
-            self.manual_points.append((x_int, y_int))
-            self.update_selected_points()
+            x_int, y_int = round(x - 0.5), round(y - 0.5)
+
+            # Manual is a singleton entry -- every manual point lands in the same
+            # row, never a new one.
+            entry = next((e for e in self.selections if e['kind'] == 'manual'), None)
+            if entry is None:
+                entry = self.add_selection('manual')
+
+            entry['geometry'].append((x_int, y_int))
+            self.recompute_entry(entry)
+            self.update_selected_points()  # also refreshes this row's "N pts" label
 
     # Along the line selection
     def handle_polygon_drawing(self, event):
@@ -1492,75 +1787,22 @@ class SelectionGUI(QtWidgets.QMainWindow):
             mouse_point = self.view.mapSceneToView(pos)
             x, y = mouse_point.x(), mouse_point.y()
 
-            # Add first polygon to the list if not yet shown
-            if self.polygon_list.count() == 0:
-                self.polygon_list.addItem("Polygon 1")
-                self.polygon_list.setCurrentRow(0)
-
-            poly = self.drawing_polygons[self.active_polygon_index]
+            poly = self.active_entry('line')
+            if poly is None:
+                poly = self.add_selection('line')
 
             # Clicking on an existing vertex is a no-op (dragging is used to move it).
-            if self.vertex_within_grab_radius(poly['points'], x, y) is not None:
+            if self.vertex_within_grab_radius(poly['geometry'], x, y) is not None:
                 return
 
-            poly['points'].append((x, y))
+            poly['geometry'].append((x, y))
             self.push_undo({
-                'type': 'add', 'kind': 'polygon', 'entry': poly, 'vertex_index': len(poly['points']) - 1
+                'type': 'add', 'kind': 'line', 'entry': poly, 'vertex_index': len(poly['geometry']) - 1
             })
 
-            # Update ROI points only for this polygon
-            if len(poly['points']) >= 2:
-                subset_size = self.get_subset_size()
-                spacing = self.distance_spinbox.value()
-                poly['roi_points'] = points_along_polygon(poly['points'], subset_size, spacing)
-
-            self.update_polygon_display()
-            self.update_selected_points()
-
-    def delete_selected_polygon(self):
-        row = self.polygon_list.currentRow()
-        if row < 0:
-            return
-
-        self.push_undo({
-            'type': 'delete', 'kind': 'polygon', 'entry': self.drawing_polygons[row], 'row': row,
-            'label': self.polygon_list.item(row).text(), 'was_only_entry': len(self.drawing_polygons) == 1,
-        })
-
-        del self.drawing_polygons[row]
-        self.polygon_list.takeItem(row)
-
-        if not self.drawing_polygons:
-            # Preserve the invariant that there is always at least one entry to draw into.
-            self.drawing_polygons = [{'points': [], 'roi_points': []}]
-            self.polygon_list.addItem("Polygon 1")
-            self.active_polygon_index = 0
-        else:
-            self.active_polygon_index = max(0, row - 1)
-
-        self.polygon_list.setCurrentRow(self.active_polygon_index)
-        self.update_polygon_display()
-        self.update_selected_points()
-
-    def update_polygon_display(self):
-        all_pts = [pt for poly in self.drawing_polygons for pt in poly['points']]
-        self.polygon_points_scatter.setData(pos=all_pts)
-
-        xs, ys = [], []
-        for poly in self.drawing_polygons:
-            path = poly['points']
-            if len(path) >= 2:
-                xs.extend([p[0] for p in path] + [np.nan])
-                ys.extend([p[1] for p in path] + [np.nan])
-            elif len(path) == 1:
-                xs.extend([path[0][0], path[0][0], np.nan])
-                ys.extend([path[0][1], path[0][1], np.nan])
-
-        self.polygon_line.setData(xs, ys)
-
-    def on_polygon_selected(self, index):
-        if 0 <= index < len(self.drawing_polygons):
-            self.active_polygon_index = index
+            self.recompute_entry(poly)
+            self.update_geometry_display()
+            self.update_selected_points()  # also refreshes this row's "N pts" label
 
     # Remove point selection
     def handle_remove_point(self, event):
@@ -1578,26 +1820,27 @@ class SelectionGUI(QtWidgets.QMainWindow):
             idx = np.argmin(distances)
             closest = tuple(pts[idx])
 
-            # Remove from manual if present
-            if closest in self.manual_points:
-                self.manual_points.remove(closest)
+            # Locate the entry that actually contributed this point (first visible
+            # entry whose entry_points() contains it), so the removal is recorded
+            # against the right owner and survives a later recompute (spacing or
+            # subset-size change) instead of being silently undone by it -- see
+            # entry_points()/recompute_entry().
+            entry = next((e for e in self.selections if e['visible'] and closest in self.entry_points(e)), None)
+            if entry is None:
+                return
 
-            # Remove from polygons
-            for poly in self.drawing_polygons:
-                if closest in poly['roi_points']:
-                    poly['roi_points'].remove(closest)
+            if entry['kind'] == 'manual':
+                # Manual points are literal -- there is nothing to regenerate, so
+                # the point is removed from geometry outright instead of via
+                # `removed` (which stays empty for manual entries, see the class
+                # docstring / removed-point semantics notes).
+                entry['geometry'] = [p for p in entry['geometry'] if tuple(p) != closest]
+                self.recompute_entry(entry)
+            else:
+                entry['removed'].add(closest)
 
-            # Remove from grid
-            for grid in self.grid_polygons:
-                if closest in grid['roi_points']:
-                    grid['roi_points'].remove(closest)
+            self.update_selected_points()  # also refreshes the owning row's "N pts" label
 
-            # Remove from brush points
-            if closest in self.brush_points:
-                self.brush_points.remove(closest)
-
-            self.update_selected_points()
-    
     # Automatic filtering
     # Shi-Tomasi method
     def compute_candidate_points_shi_tomasi(self):
@@ -1645,6 +1888,7 @@ class SelectionGUI(QtWidgets.QMainWindow):
 
         if not candidates:
             self.candidate_points = []
+            self._candidate_refresh = None
             self.update_candidate_display()
             return
 
@@ -1654,14 +1898,32 @@ class SelectionGUI(QtWidgets.QMainWindow):
 
         self.candidates_shi_tomasi = candidates
 
+        self._candidate_refresh = self.update_threshold_and_show_shi_tomsi
         self.update_threshold_and_show_shi_tomsi()
+
+    def thresholded_candidates(self, cached, threshold):
+        """Turn cached filter scores into the points to show as candidates.
+
+        :param cached: per-subset ``(y, x, score)`` tuples, as stored by the
+            ``compute_candidate_points_*`` methods
+        :type cached: list
+        :param threshold: keep only the subsets scoring strictly above this
+        :type threshold: float
+        :return: the surviving subsets, as rounded ``(x, y)`` tuples
+        :rtype: list
+        """
+        selected = {(int(round(px)), int(round(py))) for px, py in self.selected_points}
+        points = [(round(y), round(x)) for (x, y, score) in cached if score > threshold]
+        # A subset deselected since the filter ran is dropped however well it scores.
+        # `cached` itself is left alone, so re-selecting it brings the candidate back.
+        return [p for p in points if p in selected]
 
     def update_threshold_and_show_shi_tomsi(self):
         threshold_ratio = self.threshold_slider.value() / 1000.0
 
         eig_threshold = self.max_eig_shi_tomasi * threshold_ratio
 
-        self.candidate_points = [(round(y), round(x)) for (x, y, e) in self.candidates_shi_tomasi if e > eig_threshold]
+        self.candidate_points = self.thresholded_candidates(self.candidates_shi_tomasi, eig_threshold)
         self.update_candidate_display()
         self.update_candidate_points_count()
 
@@ -1676,15 +1938,6 @@ class SelectionGUI(QtWidgets.QMainWindow):
 
     def update_candidate_display(self):
         """Show candidate points as scatter dots on the image."""
-        if not hasattr(self, 'candidate_scatter'):
-            self.candidate_scatter = ScatterPlotItem(
-                pen=pg.mkPen(None),
-                brush=pg.mkBrush(0, 255, 0, 150),  # green with transparency
-                size=6,
-                symbol='o'
-            )
-            self.view.addItem(self.candidate_scatter)
-
         if self.candidate_points:
             self.candidate_scatter.setData(pos=np.array(self.candidate_points) + 0.5)
         else:
@@ -1694,6 +1947,9 @@ class SelectionGUI(QtWidgets.QMainWindow):
         """Clear candidate points."""
         # print("Clearing candidate points...")
         self.candidate_points = []
+        # Otherwise update_selected_points(), below, would re-derive them from the
+        # still-cached scores and undo the clear.
+        self._candidate_refresh = None
         self.update_candidate_points_count()
         if hasattr(self, 'candidate_scatter'):
             self.candidate_scatter.clear()
@@ -1771,23 +2027,21 @@ class SelectionGUI(QtWidgets.QMainWindow):
 
         if not candidates:
             self.candidate_points = []
+            self._candidate_refresh = None
             self.update_candidate_display()
             return
 
         values = np.array([v[2] for v in candidates])
         self.max_grad_dir = np.max(values)
         self.candidates_grad_dir = candidates
+        self._candidate_refresh = self.update_threshold_and_show_gradient_direction
         self.update_threshold_and_show_gradient_direction()
 
     def update_threshold_and_show_gradient_direction(self):
         threshold_ratio = self.gradient_thresh_slider.value() / 100.0
         threshold = self.max_grad_dir * threshold_ratio
 
-        self.candidate_points = [
-            (round(y), round(x))
-            for (x, y, v) in self.candidates_grad_dir
-            if v > threshold
-        ]
+        self.candidate_points = self.thresholded_candidates(self.candidates_grad_dir, threshold)
         self.update_candidate_display()
         self.update_candidate_points_count()
 
@@ -1830,60 +2084,75 @@ class SelectionGUI(QtWidgets.QMainWindow):
         if self._paint_mask is None:
             return
 
-        subset_size = self.get_subset_size()
-        spacing = self.distance_spinbox.value()
-
-        # Generate (row, col) points inside the painted mask
-        brush_rois = rois_inside_mask(self._paint_mask, subset_size, spacing)
-
         if self.brush_deselect_mode:
-            def point_inside_mask(pt, mask):
-                y, x = int(round(pt[0])), int(round(pt[1]))
-                h, w = mask.shape
-                return 0 <= y < h and 0 <= x < w and mask[y, x]
-
-            # Remove from manual points
-            self.manual_points = [
-                pt for pt in self.manual_points
-                if not point_inside_mask(pt, self._paint_mask)
-            ]
-
-            # Remove from polygons
-            for poly in self.drawing_polygons:
-                poly['roi_points'] = [pt for pt in poly['roi_points'] if not point_inside_mask(pt, self._paint_mask)]
-            
-            # Remove from grid polygons
-            for grid in self.grid_polygons:
-                grid['roi_points'] = [pt for pt in grid['roi_points'] if not point_inside_mask(pt, self._paint_mask)]
-
-            # Remove from brush points
-            self.brush_points = [
-                pt for pt in self.brush_points
-                if not point_inside_mask(pt, self._paint_mask)
-            ]
-
-            # Remove brush masks that are covered by the current mask
-            self.brush_masks = [mask for mask in self.brush_masks 
-                               if not np.any(mask & self._paint_mask)]
-
+            self._apply_brush_deselect()
             self.brush_deselect_mode = False
             self.brush_deselect_button.setChecked(False)
-
         else:
-            # Store the mask for future recomputation
-            self.brush_masks.append(self._paint_mask.copy())
-            # Add points to brush_points
-            self.brush_points.extend(brush_rois)
+            # One entry per stroke.
+            entry = self.add_selection('brush', geometry=self._paint_mask.copy())
+            self.recompute_entry(entry)
 
         self._paint_mask = None
+        self.update_geometry_display()
         self.update_selected_points()
         self.update_brush_overlay()
 
-    def update_brush_overlay(self):
-        if not hasattr(self, 'brush_overlay'):
-            self.brush_overlay = ImageItem()
-            self.view.addItem(self.brush_overlay)
+    def _apply_brush_deselect(self):
+        """Remove every point covered by the current deselect-mode brush stroke.
 
+        For a ``brush`` entry the stroke is subtracted from the painted mask itself,
+        so only the overlapping area is lost and the rest of the stroke survives; the
+        entry is dropped (and its row removed from ``selection_list``) only once
+        nothing is left painted. Editing the mask rather than the derived points is
+        what makes the deselection outlast a recompute.
+
+        For every other kind the covered points are recorded in the entry's
+        ``removed`` set (``manual`` excepted -- see below), which ``entry_points()``
+        applies on read, so those deselections survive a spacing/subset-size change
+        too.
+        """
+        def point_inside_mask(pt, mask):
+            y, x = int(round(pt[0])), int(round(pt[1]))
+            h, w = mask.shape
+            return 0 <= y < h and 0 <= x < w and mask[y, x]
+
+        active = self.active_entry()
+        rows_to_delete = []
+        for row, entry in enumerate(self.selections):
+            if entry['kind'] == 'brush':
+                entry['geometry'] = entry['geometry'] & ~self._paint_mask
+                if not entry['geometry'].any():
+                    rows_to_delete.append(row)
+                else:
+                    self.recompute_entry(entry)
+                continue
+            covered = [tuple(pt) for pt in self.entry_points(entry) if point_inside_mask(pt, self._paint_mask)]
+            if entry['kind'] == 'manual':
+                # Manual points are literal: drop them from geometry outright, the same
+                # way handle_remove_point does. Recording them in `removed` instead would
+                # make a later click on the very same pixel silently do nothing.
+                covered_set = set(covered)
+                entry['geometry'] = [p for p in entry['geometry'] if tuple(p) not in covered_set]
+                self.recompute_entry(entry)
+            else:
+                entry['removed'].update(covered)
+
+        for row in reversed(rows_to_delete):
+            del self.selections[row]
+            self.selection_list.takeItem(row)
+
+        # Deleting rows shifts every later index, so re-derive the active one from the
+        # entry object rather than leaving a stale (possibly out-of-range) index behind.
+        # Matched by identity: `==` on entry dicts compares their values, which raises
+        # on a brush entry's numpy mask ("truth value of an array is ambiguous").
+        self.active_index = next((i for i, e in enumerate(self.selections) if e is active), None)
+        if self.active_index is not None:
+            self._syncing_list = True
+            self.selection_list.setCurrentRow(self.active_index)
+            self._syncing_list = False
+
+    def update_brush_overlay(self):
         if self._paint_mask is not None:
             rgba = np.zeros((*self._paint_mask.shape, 4), dtype=np.uint8)
             if self.brush_deselect_mode:
