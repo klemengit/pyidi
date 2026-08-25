@@ -105,6 +105,38 @@ into a single deferred redraw carrying the latest values. A fast drag therefore
 repaints as often as it can rather than queueing every position on the way, and
 lands on the value the control stopped at.
 
+Three things then made every redraw more expensive than it had to be. A masked
+selection ran over the whole frame, though nothing outside the mask was ever
+eligible: it now runs inside the mask's bounding box, snapped back to a whole
+reduction cell so the block grid falls where it would have and the answer is
+identical. Every selected point was stamped into a full-frame occupancy array
+so that a later group could not fill its gaps -- a Python loop over all of them,
+84 ms at seventeen thousand points, and there is usually no later group, so it
+is now skipped unless one is coming. And the seeded whole-image row was
+re-rasterising each region from scratch to decide whether to stand down,
+bypassing the cache that already had the answer.
+
+What is left of a redraw is drawing, and the two big point layers -- the
+selected points and the dim blue candidates -- are now one stroked path each
+rather than a `ScatterPlotItem`. The item keeps a record per spot and rebuilds
+a symbol atlas, 17 ms for seventeen thousand points on every redraw; a path of
+very short segments stroked with a round-cap pen draws the same dots from one
+vectorised call, in 2 ms. Layers with a per-point colour, a symbol or a hover
+behaviour still use the scatter item.
+
+Together, on a 2560x1600 frame at separation 6: placing a polygon corner over a
+drawn region went from 115 ms to 30 ms, and a redraw with the whole frame
+selected from 342 ms to 158 ms.
+
+A brush stroke updates nothing but itself. It used to cost a mouse move what a
+full redraw costs -- a whole-frame RGBA overlay rebuilt and re-uploaded per dab,
+and the entire point cloud handed back to the scatter item to take the covered
+points out of it -- which is 24 ms a move at 17 000 points on a four-megapixel
+frame, paid while the mouse is moving. The stroke is now a path of overlapping
+discs rather than a raster, and the crossing-out is drawn *over* the red points
+instead of replacing them, so a move costs the points it reached and nothing
+else: 0.1 ms. The selection itself is re-run once, when the stroke lands.
+
 Because a mask or threshold edit only re-derives from a cached score, the
 interface updates while a slider is still moving; only a subset-size or
 evaluator change recomputes.

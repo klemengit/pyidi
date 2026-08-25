@@ -370,7 +370,8 @@ class SelectionPipeline:
         taken = np.zeros(self.shape, dtype=bool)
         literal_taken = occupancy(literal, self.shape, 0) if len(literal) else None
         picked = []
-        for (score_name, selector, params), mask in self._mask_groups():
+        groups = self._mask_groups()
+        for index, ((score_name, selector, params), mask) in enumerate(groups):
             if not mask.any():
                 continue
             radius = max(0, int(params.get('separation', 0)))
@@ -382,8 +383,12 @@ class SelectionPipeline:
                             occupied=occupied, **params)
             # Everything selected is stamped, including what decimation is about
             # to drop, so thinning one group leaves gaps rather than inviting the
-            # next group to fill them in.
-            taken |= occupancy(points, self.shape, radius)
+            # next group to fill them in. Only what a later group will read: the
+            # stamp is a Python loop over every selected point, which is 84 ms at
+            # seventeen thousand of them and is usually thrown away unread, since
+            # one set of settings for the whole image is one group.
+            if index + 1 < len(groups):
+                taken |= occupancy(points, self.shape, radius)
             picked.append(as_point_array(decimate(points, stride=params.get('decimation'))))
         return np.vstack(picked) if picked else as_point_array([])
 

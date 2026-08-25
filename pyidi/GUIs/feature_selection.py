@@ -49,7 +49,6 @@ from ..selection import (
     SELECTORS,
     SelectionPipeline,
     available_evaluators,
-    rasterize,
 )
 from ..selection_geometry import _as_size_pair
 
@@ -155,6 +154,58 @@ class OddSpinBox(QtWidgets.QSpinBox):
     def setValue(self, value):
         """Set the value, rounded up to odd. Programmatic writes come here too."""
         super().setValue(odd(value))
+
+
+#: Length of the segment a dot is drawn as, in image pixels. Only has to be
+#: non-zero: Qt draws nothing for a degenerate subpath.
+DOT_LENGTH = 1e-3
+
+
+class DotCloud(QtWidgets.QGraphicsPathItem):
+    """Uniform round dots, drawn as one stroked path.
+
+    A ``ScatterPlotItem`` is the obvious way to draw these and the wrong one at
+    this scale: it keeps a record per spot and rebuilds a symbol atlas, which is
+    17 ms for seventeen thousand points and is paid on every redraw. A path of
+    zero-length segments stroked with a round-cap pen draws the same dots -- the
+    cap *is* the dot -- and is built by one vectorised call: 2 ms.
+
+    The pen is cosmetic, so the dots keep their size in screen pixels at any
+    zoom, which is what the scatter item did too.
+
+    Only the layers that are genuinely uniform use this. Anything with a per-point
+    colour, a symbol or a hover behaviour still wants the scatter item.
+    """
+
+    def __init__(self, colour, size):
+        super().__init__()
+        pen = pg.mkPen(*colour, width=size)
+        pen.setCapStyle(QtCore.Qt.PenCapStyle.RoundCap)
+        pen.setCosmetic(True)
+        self.setPen(pen)
+        self._pos = np.empty((0, 2))
+
+    def setData(self, pos):
+        """Draw a dot at each ``(x, y)`` row of ``pos``."""
+        pos = np.asarray(pos, dtype=float)
+        self._pos = pos
+        if not len(pos):
+            self.setPath(QtGui.QPainterPath())
+            return
+        # Each point twice, joined in pairs: one very short segment per point,
+        # whose round cap is the dot. Short rather than zero-length, because Qt
+        # drops a degenerate subpath and draws nothing at all; a thousandth of a
+        # pixel is far below the width the cap draws at any zoom.
+        x = np.repeat(pos[:, 0], 2)
+        x[1::2] += DOT_LENGTH
+        self.setPath(pg.arrayToQPath(x, np.repeat(pos[:, 1], 2), connect='pairs'))
+
+    def clear(self):
+        self.setData(np.empty((0, 2)))
+
+    def getData(self):
+        """``(x, y)``, matching :meth:`ScatterPlotItem.getData`."""
+        return self._pos[:, 0], self._pos[:, 1]
 
 
 class CanvasViewBox(pg.ViewBox):
@@ -335,6 +386,7 @@ class FeatureSelectionGUI(QtWidgets.QMainWindow):
         self.direction_button = None
         self.score_toggles = []
         self._paint = None
+        self._stroke_path = None
         self._syncing = False
         self._last_refresh_ms = 0.0
         self._refresh_timer = QtCore.QTimer(self)
@@ -421,7 +473,6 @@ class FeatureSelectionGUI(QtWidgets.QMainWindow):
         self.image_item = ImageItem(axisOrder='row-major')
         self.score_overlay = ImageItem(axisOrder='row-major')
         self.roi_overlay = ImageItem(axisOrder='row-major')
-        self.brush_overlay = ImageItem(axisOrder='row-major')
 
         # The subset borders live apart from the translucent fill so they can be
         # stroked with a *cosmetic* pen, whose width is in screen pixels: they stay
@@ -433,19 +484,27 @@ class FeatureSelectionGUI(QtWidgets.QMainWindow):
         self.roi_outline.setPen(pen)
         self.roi_outline.setBrush(pg.mkBrush(None))
 
+        # The stroke being painted is a path of overlapping discs rather than a
+        # raster overlay. A raster one has to be rebuilt and re-uploaded whole on
+        # every mouse move -- eight milliseconds a move on a four-megapixel frame,
+        # paid while the mouse is moving, which is exactly when it is felt.
+        self.brush_overlay = QtWidgets.QGraphicsPathItem()
+        self.brush_overlay.setPen(pg.mkPen(None))
+
         self.geometry_line = pg.PlotDataItem(pen=pg.mkPen('y', width=2))
         self.geometry_vertices = ScatterPlotItem(pen=pg.mkPen(None), brush=pg.mkBrush(255, 255, 0, 200), size=7)
-        self.point_scatter = ScatterPlotItem(pen=pg.mkPen(None), brush=pg.mkBrush(255, 100, 100, 220), size=7)
+        self.point_scatter = DotCloud((255, 100, 100, 220), 7)
         # The features the mask is leaving out, shown while masking so that an
         # empty patch says which of the two things it is: nothing to track
         # there, or something you have masked away. Smaller and greyer than a
         # selected point, and drawn under it, so the two never read alike.
-        self.candidate_scatter = ScatterPlotItem(
-            pen=pg.mkPen(None), brush=pg.mkBrush(90, 170, 255, 170), size=5)
+        self.candidate_scatter = DotCloud((90, 170, 255, 170), 5)
         # Points the deselect brush is about to take away, shown while the stroke
-        # is still being painted rather than only after the mouse comes up.
+        # is still being painted rather than only after the mouse comes up. White,
+        # and drawn over the stroke's red wash rather than under it, which is the
+        # only place it is ever seen.
         self.doomed_scatter = ScatterPlotItem(
-            pen=pg.mkPen(160, 160, 160, 220, width=1), brush=pg.mkBrush(None), size=8, symbol='x')
+            pen=pg.mkPen(255, 255, 255, 240, width=1.5), brush=pg.mkBrush(None), size=9, symbol='x')
         self.highlight_scatter = ScatterPlotItem(
             pen=pg.mkPen(255, 0, 255, 230, width=2), brush=pg.mkBrush(None), size=13)
         self.direction_line = pg.PlotDataItem(pen=pg.mkPen('r', width=2))
@@ -453,8 +512,8 @@ class FeatureSelectionGUI(QtWidgets.QMainWindow):
         for item, z in ((self.image_item, 0), (self.score_overlay, 0.5), (self.roi_overlay, 1),
                         (self.roi_outline, 1), (self.geometry_line, 2), (self.geometry_vertices, 2),
                         (self.candidate_scatter, 2.5), (self.point_scatter, 3),
-                        (self.doomed_scatter, 3), (self.highlight_scatter, 3),
-                        (self.direction_line, 3.5), (self.brush_overlay, 4)):
+                        (self.highlight_scatter, 3), (self.direction_line, 3.5),
+                        (self.brush_overlay, 4), (self.doomed_scatter, 4.5)):
             item.setZValue(z)
             self.view.addItem(item)
         self.score_overlay.setVisible(False)
@@ -942,7 +1001,7 @@ class FeatureSelectionGUI(QtWidgets.QMainWindow):
             # which is not the same as which row this is.
             if entry is self._whole_image:
                 seeded = entry
-            elif entry.role == 'mask' and entry.visible and rasterize(entry, self.pipeline.shape).any():
+            elif entry.role == 'mask' and entry.visible and self.pipeline.area(entry).any():
                 others = True
         if seeded is None or not seeded.visible or not others:
             return
@@ -1093,6 +1152,8 @@ class FeatureSelectionGUI(QtWidgets.QMainWindow):
     def brush_start(self):
         """Begin a stroke."""
         self._paint = np.zeros(self.pipeline.shape, dtype=bool)
+        self._stroke_path = QtGui.QPainterPath()
+        self._stroke_path.setFillRule(QtCore.Qt.FillRule.WindingFill)
 
     def brush_move(self, position):
         """Add a dab at ``position``, given as ``(row, col)`` or ``None``."""
@@ -1106,11 +1167,15 @@ class FeatureSelectionGUI(QtWidgets.QMainWindow):
         dab = (rows - row) ** 2 + (cols - col) ** 2 <= radius ** 2
         self._paint[max(0, row - radius):min(height, row + radius + 1),
                     max(0, col - radius):min(width, col + radius + 1)][dab] = True
+        # x is the column and y the row, and the ellipse is inscribed in the
+        # square the raster dab fills.
+        self._stroke_path.addEllipse(
+            QtCore.QRectF(col - radius, row - radius, 2 * radius + 1, 2 * radius + 1))
         self.draw_brush()
         if self.deselect_mode:
             # Cheap: it re-reads the stroke against points already computed,
             # rather than re-running the pipeline on every mouse move.
-            self.draw_points()
+            self.draw_doomed()
 
     def brush_end(self):
         """Commit the stroke, either as a new region or as a deselection."""
@@ -1118,6 +1183,7 @@ class FeatureSelectionGUI(QtWidgets.QMainWindow):
             return
         stroke = self._paint
         self._paint = None
+        self._stroke_path = QtGui.QPainterPath()
         if not stroke.any():
             self.draw_brush()
             return
@@ -1545,26 +1611,33 @@ class FeatureSelectionGUI(QtWidgets.QMainWindow):
             self.doomed_scatter.clear()
             self.clear_subset_rectangles()
             return
-        # While a deselect stroke is being painted, the points it covers are
-        # crossed out rather than left looking untouched until the mouse comes up.
-        doomed = None
-        if self._paint is not None and self.deselect_mode:
-            doomed = self._paint[points[:, 0], points[:, 1]]
-            if not doomed.any():
-                doomed = None
-
         # +0.5 puts the marker at the pixel centre rather than its top-left corner.
-        if doomed is None:
-            self.doomed_scatter.clear()
-            self.point_scatter.setData(pos=points[:, ::-1] + 0.5)
-        else:
-            self.point_scatter.setData(pos=points[~doomed][:, ::-1] + 0.5)
-            self.doomed_scatter.setData(pos=points[doomed][:, ::-1] + 0.5)
+        self.point_scatter.setData(pos=points[:, ::-1] + 0.5)
+        self.draw_doomed()
         if self.show_subsets.isChecked():
             height, width = self.pipeline.subset_size
             self.draw_subset_rectangles(points, height // 2, width // 2)
         else:
             self.clear_subset_rectangles()
+
+    def draw_doomed(self):
+        """Cross out the points the deselect stroke has covered so far.
+
+        Drawn *over* the red points rather than swapped for them, so a stroke in
+        progress costs only the handful of points it has reached: replacing the
+        cloud would mean handing every one of tens of thousands of positions back
+        to the scatter item on every mouse move, which is what made a long stroke
+        drag behind the cursor.
+        """
+        points = getattr(self, '_points', None)
+        if points is None or not len(points) or self._paint is None or not self.deselect_mode:
+            self.doomed_scatter.clear()
+            return
+        doomed = self._paint[points[:, 0], points[:, 1]]
+        if not doomed.any():
+            self.doomed_scatter.clear()
+            return
+        self.doomed_scatter.setData(pos=points[doomed][:, ::-1] + 0.5)
 
     def draw_candidates(self):
         """Show what the mask is leaving out, on the mask step.
@@ -1677,13 +1750,18 @@ class FeatureSelectionGUI(QtWidgets.QMainWindow):
         self.highlight_scatter.setData(pos=array[:, ::-1] + 0.5)
 
     def draw_brush(self):
-        """Show the stroke currently being painted."""
+        """Show the stroke currently being painted.
+
+        The path is filled with the winding rule, so the dabs read as one
+        translucent stroke rather than as a chain of discs darkening where they
+        overlap.
+        """
         if self._paint is None:
-            self.brush_overlay.clear()
+            self.brush_overlay.setPath(QtGui.QPainterPath())
             return
-        rgba = np.zeros((*self._paint.shape, 4), dtype=np.uint8)
-        rgba[self._paint] = [255, 0, 0, 80] if self.deselect_mode else [0, 200, 255, 80]
-        self.brush_overlay.setImage(rgba, autoLevels=False)
+        colour = (255, 0, 0, 80) if self.deselect_mode else (0, 200, 255, 80)
+        self.brush_overlay.setBrush(pg.mkBrush(*colour))
+        self.brush_overlay.setPath(self._stroke_path)
 
     def draw_score(self):
         """Show the current score image as a heatmap, transparent where invalid."""

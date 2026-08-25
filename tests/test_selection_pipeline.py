@@ -18,6 +18,8 @@ The three steps are tested separately and then together:
   blob of adjacent pixels on every corner.
 """
 
+import sys
+
 import numpy as np
 import pytest
 from scipy.ndimage import sobel
@@ -482,6 +484,59 @@ def test_an_unknown_threshold_mode_is_rejected(speckle):
     score = evaluate(speckle, 'shi_tomasi', 11)
     with pytest.raises(ValueError, match='mode must be'):
         threshold_value(score, None, 'quantile', 0.9)
+
+
+# ---------------------------------------------------------------------------
+# select -- a mask is worked inside its own bounding box
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize('separation', [1, 2, 5, 9, 14])
+@pytest.mark.parametrize('box', [(30, 90, 40, 100), (0, 200, 0, 200), (7, 23, 131, 149)])
+def test_a_masked_selection_is_worked_in_the_masks_bounding_box(monkeypatch, separation, box):
+    """The crop is an optimisation, so it has to give the identical answer.
+
+    Cropping to the bounding box is only sound if the block grid the reduction
+    uses lands where it would have on the whole frame; an offset grid answers a
+    slightly different question and quietly returns different points.
+    """
+    # By name, because ``pyidi.selection.select`` is the function: the package
+    # exports it under the same name as the module it lives in.
+    select_module = sys.modules['pyidi.selection.select']
+
+    rng = np.random.default_rng(7)
+    score = rng.random((200, 200)) * 10
+    score[:3] = score[-3:] = score[:, :3] = score[:, -3:] = np.nan
+    r0, r1, c0, c1 = box
+    mask = np.zeros(score.shape, dtype=bool)
+    mask[r0:r1, c0:c1] = True
+
+    cropped = select_peaks(score, mask=mask, separation=separation, threshold=0.2)
+
+    monkeypatch.setattr(select_module, '_mask_window',
+                        lambda mask, cell: (slice(0, mask.shape[0]), slice(0, mask.shape[1])))
+    whole = select_peaks(score, mask=mask, separation=separation, threshold=0.2)
+
+    assert cropped == whole
+
+
+def test_an_empty_mask_selects_nothing():
+    score = np.random.default_rng(0).random((60, 60))
+    assert select_peaks(score, mask=np.zeros((60, 60), dtype=bool), separation=4) == []
+
+
+def test_a_hand_picked_point_outside_the_mask_still_keeps_its_distance():
+    """The crop must not lose the area blocked by a point beyond its edge."""
+    score = np.ones((60, 60))
+    mask = np.zeros((60, 60), dtype=bool)
+    mask[30:50, 30:50] = True
+    blocked = occupancy([(30, 30)], score.shape, radius=8)
+
+    points = select_peaks(score, mask=mask, separation=2, threshold=0,
+                          max_points=None, occupied=blocked)
+
+    assert points, 'the whole region cannot have been blocked'
+    distance = np.hypot(*(np.asarray(points, dtype=float) - (30, 30)).T)
+    assert distance.min() > 8
 
 
 # ---------------------------------------------------------------------------
@@ -1093,6 +1148,22 @@ def test_decimating_one_group_does_not_let_another_fill_the_gaps(speckle):
     undecimated = right_hand_points(1)
     assert len(undecimated) > 5
     np.testing.assert_array_equal(right_hand_points(4), undecimated)
+
+
+def test_a_later_group_keeps_clear_of_an_earlier_ones_points(speckle):
+    """The stamp is skipped when no group follows, so prove one that does reads it."""
+    pipeline = SelectionPipeline(speckle, subset_size=11)
+    first = pipeline.add_entry('polygon', rect(10, 10, 90, 80))
+    second = pipeline.add_entry('polygon', rect(10, 40, 90, 110))    # overlapping
+    first.selector_params = {'separation': 9, 'threshold': 0.05}
+    second.selector_params = {'separation': 4, 'threshold': 0.05}
+
+    credited = pipeline.points_and_credits()[1]
+    mine, theirs = np.asarray(credited[0], dtype=float), np.asarray(credited[1], dtype=float)
+    assert len(mine) and len(theirs)
+
+    gap = np.hypot(mine[:, None, 0] - theirs[None, :, 0], mine[:, None, 1] - theirs[None, :, 1])
+    assert gap.min() > 9
 
 
 # ---------------------------------------------------------------------------

@@ -146,6 +146,35 @@ def _disc(radius):
     return offsets[:, None] ** 2 + offsets[None, :] ** 2 <= radius * radius
 
 
+def _mask_window(mask, cell):
+    """The slices bounding the mask's area, snapped back to a whole cell.
+
+    Everything the selection does is linear in the pixels it is handed, and a
+    region drawn on a large frame is usually a small part of it. Nothing outside
+    the mask can be selected, so the work outside its bounding box -- a
+    full-frame threshold comparison, a full-frame block reduction, a full-frame
+    occupancy grid -- is spent on pixels that were never in the running.
+
+    The start is floored to a multiple of ``cell`` so that the block grid of
+    :func:`_block_best` falls exactly where it would have on the whole frame.
+    The reduction has to pick the same winners as before, not merely similar
+    ones: a grid offset by a few pixels answers a slightly different question.
+
+    :param mask: boolean array restricting where points may be placed
+    :type mask: numpy.ndarray
+    :param cell: the block size the reduction will use
+    :type cell: int
+    :return: ``(row_slice, col_slice)``, or ``None`` if the mask is empty
+    :rtype: tuple[slice, slice] or None
+    """
+    rows = np.flatnonzero(mask.any(axis=1))
+    if not rows.size:
+        return None
+    cols = np.flatnonzero(mask.any(axis=0))
+    return (slice((rows[0] // cell) * cell, rows[-1] + 1),
+            slice((cols[0] // cell) * cell, cols[-1] + 1))
+
+
 def _block_best(score, eligible, cell):
     """The best eligible pixel in each ``cell`` x ``cell`` block of the image.
 
@@ -299,6 +328,24 @@ def select_peaks(score, mask=None, separation=DEFAULT_SEPARATION, threshold=DEFA
     :return: ``(row, col)`` coordinates, best first
     :rtype: list[tuple[int, int]]
     """
+    separation = max(1, int(separation))
+    # Two is the smallest cell that reduces anything, and the walk over an
+    # unreduced megapixel frame is 300 ms.
+    cell = 1 if separation <= 1 else max(2, separation // CANDIDATE_CELL_FRACTION)
+
+    # Everything below runs on the mask's bounding box rather than the frame.
+    # The answer is the same -- nothing outside the mask was ever eligible, and
+    # `occupied` already carries the area blocked by points outside it.
+    offset_r = offset_c = 0
+    if mask is not None:
+        window = _mask_window(mask, cell)
+        if window is None:
+            return []
+        offset_r, offset_c = window[0].start, window[1].start
+        score, mask = score[window], mask[window]
+        if occupied is not None:
+            occupied = np.asarray(occupied, dtype=bool)[window]
+
     limit = threshold_value(score, mask, threshold_mode, threshold)
     # NaN compares False against any threshold, so the invalid border is
     # excluded here without a separate test.
@@ -306,7 +353,6 @@ def select_peaks(score, mask=None, separation=DEFAULT_SEPARATION, threshold=DEFA
     if mask is not None:
         eligible &= mask
 
-    separation = max(1, int(separation))
     if separation <= 1:
         # Nothing to suppress, so there is no walk to feed and no reason to
         # reduce anything: it is the pixels above the threshold, capped. What is
@@ -316,14 +362,16 @@ def select_peaks(score, mask=None, separation=DEFAULT_SEPARATION, threshold=DEFA
         if occupied is not None:
             eligible = eligible & ~np.asarray(occupied, dtype=bool)
         rows, cols = _ordered_candidates(score, eligible, max_points)
-        return suppress(rows, cols, score.shape, 0, max_points)
+        points = suppress(rows, cols, score.shape, 0, max_points)
+    else:
+        rows, cols = _block_best(score, eligible, cell)
+        order = np.argsort(-score[rows, cols], kind='stable')
+        points = suppress(rows[order], cols[order], score.shape, separation, max_points, occupied)
 
-    # Two is the smallest cell that reduces anything, and the walk over an
-    # unreduced megapixel frame is 300 ms.
-    cell = max(2, separation // CANDIDATE_CELL_FRACTION)
-    rows, cols = _block_best(score, eligible, cell)
-    order = np.argsort(-score[rows, cols], kind='stable')
-    return suppress(rows[order], cols[order], score.shape, separation, max_points, occupied)
+    if points and (offset_r or offset_c):
+        shifted = np.asarray(points) + (offset_r, offset_c)
+        points = list(zip(shifted[:, 0].tolist(), shifted[:, 1].tolist()))
+    return points
 
 
 def select_lattice(score, mask=None, pitch=12, threshold=DEFAULT_THRESHOLD,

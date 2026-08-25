@@ -99,7 +99,9 @@ print(f'{video.N} frames, {video.image_height} x {video.image_width} (height x w
 #     and "you masked it away". The blue ones do not move as you paint - they
 #     are the whole-frame selection, so a stroke turns them red where it lands.
 #   * WATCH THE POINTS AS YOU DESELECT. The ones under the stroke are crossed
-#     out while you are still painting, and gone when you let go.
+#     out while you are still painting, and gone when you let go. Nothing else
+#     moves until then: the stroke costs the points it has reached, and the
+#     selection is re-run once, when you let go.
 #   * 'Clear all' STARTS OVER rather than clearing to nothing: the whole frame
 #     comes back, as when the window opened. Deleting the 'Whole image' row on
 #     its own still selects nothing - a different act.

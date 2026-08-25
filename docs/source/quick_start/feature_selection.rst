@@ -95,7 +95,8 @@ Five tools, on the right:
   place.
 
 Points under a deselect stroke are crossed out while you paint, so you can see
-what the stroke is about to take before you let go.
+what the stroke is about to take before you let go. Nothing else moves until
+you let go: the selection is re-run once, when the stroke lands.
 
 While masking, the points come in three tiers, because an empty patch otherwise
 means two different things — nothing to track there, or something you have
@@ -211,6 +212,14 @@ of 11 it finds 1708 points where the exact walk finds 2193, in 9 ms instead of
 39. What it does not cost is the guarantee — the walk still runs, so the
 separation still holds exactly — and a point count is what the separation
 control is for adjusting anyway.
+
+A masked selection works inside the mask's bounding box rather than over the
+whole frame, since nothing outside the mask was ever eligible. The box is
+snapped back to a whole reduction cell so the block grid falls exactly where it
+would have on the frame, which is what makes the answer identical rather than
+merely similar. A region drawn on a large frame therefore costs the region:
+placing a polygon corner over a 600 × 600 region on a 2560 × 1600 frame takes
+30 ms.
 
 Why quality and not a percentile
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

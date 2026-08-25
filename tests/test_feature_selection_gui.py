@@ -30,7 +30,7 @@ import pytest  # noqa: E402
 
 pytest.importorskip("PyQt6")
 
-from PyQt6 import QtCore, QtWidgets  # noqa: E402
+from PyQt6 import QtCore, QtGui, QtWidgets  # noqa: E402
 
 sys.ps1 = getattr(sys, "ps1", ">>> ")
 QtWidgets.QApplication.exec = lambda self=None: 0
@@ -888,7 +888,47 @@ def test_a_deselect_stroke_crosses_out_the_points_it_covers():
 
         doomed = crossed_out(gui)
         assert doomed > 0
-        assert len(gui.point_scatter.getData()[0]) == len(gui.get_points()) - doomed
+        # The crosses go over the red points rather than replacing them: a stroke
+        # then costs only the points it has reached, not the whole cloud.
+        assert len(gui.point_scatter.getData()[0]) == len(gui.get_points())
+    finally:
+        gui.close()
+
+
+def test_painting_a_stroke_leaves_the_point_cloud_alone():
+    """The cost of a mouse move is the points it reached, not every point drawn.
+
+    Handing tens of thousands of positions back to the scatter item on every
+    move is what made a long stroke lag behind the cursor.
+    """
+    gui = gui_with_region()
+    try:
+        gui.select_step(STEP_MASK)
+        gui.select_tool('brush')
+        gui.deselect_button.setChecked(True)
+        before = gui.point_scatter.getData()[0].copy()
+
+        gui.brush_start()
+        gui.brush_radius.setValue(40)
+        gui.brush_move((80.0, 120.0))
+
+        assert crossed_out(gui) > 0
+        assert np.array_equal(gui.point_scatter.getData()[0], before)
+    finally:
+        gui.close()
+
+
+def test_the_stroke_is_drawn_without_rebuilding_a_full_frame_image():
+    """A raster overlay costs the whole frame per move, however small the dab."""
+    gui = gui_with_region()
+    try:
+        gui.select_step(STEP_MASK)
+        gui.select_tool('brush')
+        gui.brush_start()
+        gui.brush_move((80.0, 120.0))
+        assert not gui.brush_overlay.path().isEmpty()
+        gui.brush_end()
+        assert gui.brush_overlay.path().isEmpty()
     finally:
         gui.close()
 
@@ -1181,6 +1221,43 @@ def test_the_cap_says_so_rather_than_looking_like_a_threshold():
 # ---------------------------------------------------------------------------
 # What the mask is leaving out
 # ---------------------------------------------------------------------------
+
+def rendered(gui):
+    """The canvas as three ``(h, w)`` integer channels: red, green, blue.
+
+    Copied out of the QImage, which owns the buffer and frees it on the way out,
+    and signed, so that one channel can be subtracted from another.
+    """
+    image = gui.pg_widget.grab().toImage().convertToFormat(
+        QtGui.QImage.Format.Format_RGB32)
+    raw = np.frombuffer(image.constBits().asarray(image.sizeInBytes()), dtype=np.uint8)
+    pixels = raw.reshape(image.height(), image.width(), 4).astype(np.int16)
+    return pixels[..., 2], pixels[..., 1], pixels[..., 0]
+
+
+def test_the_two_point_layers_actually_paint():
+    """Rendered, not just handed the right coordinates.
+
+    The dots are one stroked path rather than a scatter item, and Qt draws
+    nothing at all for a zero-length subpath -- a failure no assertion about what
+    the item was *given* can see.
+    """
+    gui = empty_gui()
+    try:
+        gui.pipeline.add_entry('polygon', rect(20, 20, 60, 60))
+        gui.active_index = 0
+        gui.select_step(STEP_MASK)
+        gui.show_subsets.setChecked(False)
+        gui.refresh()
+
+        red, green, blue = rendered(gui)
+        # The red points, told apart from the magenta rings by their blue.
+        assert ((red > 150) & (red - blue > 60) & (red - green > 40)).sum() > 20
+        # The dim blue candidates outside the polygon.
+        assert ((blue > 120) & (blue - red > 60)).sum() > 20
+    finally:
+        gui.close()
+
 
 def greyed(gui):
     """The dimmed candidate positions currently drawn, as ``(row, col)``."""
