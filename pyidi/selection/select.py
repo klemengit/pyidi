@@ -6,20 +6,39 @@ because the grid had already spaced the candidates out. On a dense score image
 it returns a solid blob of adjacent pixels around every strong corner -- a
 thousand subsets stacked on top of each other, all tracking the same feature.
 
-So selection is threshold *plus* non-maximum suppression: walk the candidates
-from best to worst and accept one only if nothing already accepted is within
-``min_distance`` of it. This is what ``goodFeaturesToTrack`` does, and it is
-what makes the result look like a set of features rather than a heat map.
+So the selection has one other control: a **separation**, the distance no two
+selected points may come closer than. Thinning the thresholded pixels any
+other way does not work, and the numbers are worth recording, because "just keep
+every n-th of them" is the obvious thing to reach for. On a 1024x1024 frame with
+357k pixels above the threshold, thinned to twenty thousand points:
 
-The suppression is done with a boolean occupancy array rather than pairwise
-distances: accepting a point stamps a disc into the array, and a candidate is
-rejected by a single lookup. That is what makes the exact greedy walk
-affordable -- roughly 20 ms over the 10^5 candidates a 90th-percentile
-threshold leaves on a megapixel frame, because the expensive stamping happens
-only for the few thousand points actually accepted. There is a cheaper
-approximation (keep only local maxima, then suppress), and it is deliberately
-not used: it is *not* equivalent, since a candidate dominated by a neighbour
-that is itself suppressed can legitimately survive.
+  ==========================  =========  ===============
+  rule                        median gap  pairs under 3 px
+  ==========================  =========  ===============
+  every n-th, best first        2.0 px        78%
+  every n-th, in scan order     1.0 px        92%
+  separation                       >= n px        0%
+  ==========================  =========  ===============
+
+Keeping every n-th of a list ordered by score fails because consecutive ranks
+are neighbours on the same feature; keeping every n-th in scan order fails
+because the stride aliases against the row length and lands in columns. Either
+way the great majority of subsets end up on top of another one.
+
+Spacing is enforced by a greedy walk from best to worst, accepting a candidate
+only if nothing already accepted is within the separation of it -- what
+``goodFeaturesToTrack`` does. The walk uses a boolean occupancy array rather
+than pairwise distances: accepting a point stamps a disc into it, and a
+candidate is rejected by a single lookup.
+
+That walk is exact but it is linear in the *candidates*, and a loose threshold
+leaves hundreds of thousands of them -- 40 ms to 300 ms, which no slider can
+drag. So the candidates are reduced first, to the best pixel in each cell of a
+grid half the separation across. It is an approximation, and what it costs is
+yield: at a separation of 11 it finds 1708 points where the exact walk finds
+2193, in 9 ms instead of 39. What it does not cost is the guarantee -- the walk
+still runs, so the separation still holds exactly -- and a point count is what
+the separation control is for adjusting anyway.
 
 The occupancy array also gives the merge with hand-picked points for free --
 stamp those into it before picking starts and no automatic point can ever crowd
@@ -33,17 +52,52 @@ import numpy as np
 from ..selection_geometry import _as_size_pair
 
 #: Cap on the number of points a single selection returns. Finite by default:
-#: a dense score image with a small minimum distance can otherwise produce tens
-#: of thousands of subsets from one careless slider drag.
+#: a dense score image with a separation of 1 can otherwise produce tens of
+#: thousands of subsets from one careless slider drag.
 DEFAULT_MAX_POINTS = 20000
 
-#: Default threshold, as a percentile of the finite in-mask scores. Percentile
-#: rather than fraction-of-maximum because the maximum over a megapixel is far
-#: more extreme than over a few hundred grid subsets, so a single specular
-#: highlight compresses every useful fraction into the bottom of the slider.
-DEFAULT_THRESHOLD = 90.0
+#: Default threshold: keep anything at least this good a fraction of the best
+#: feature in the region. See :data:`ROBUST_MAXIMUM_PERCENTILE` for why "best"
+#: is not the literal maximum.
+DEFAULT_THRESHOLD = 0.01
 
-THRESHOLD_MODES = ('percentile', 'fraction')
+#: How many candidates the suppression walk tests for occupancy at a time.
+#: Large enough that the vectorised read dominates the Python loop, small enough
+#: that a `max_points` cap still stops early rather than doing a whole pass.
+SUPPRESS_CHUNK = 4096
+
+#: Percentile of the eligible scores taken as "the best feature here".
+#:
+#: Not the maximum, which one dust mote or specular highlight can push an order
+#: of magnitude above everything real, dragging every useful quality setting
+#: into the bottom of the slider. The 99.9th percentile is the same number on a
+#: well-behaved frame and survives a handful of outliers on a bad one.
+ROBUST_MAXIMUM_PERCENTILE = 99.9
+
+#: Default separation, in pixels: the distance no two selected points come closer
+#: than.
+DEFAULT_SEPARATION = 11
+
+#: Cell size used to reduce the candidates before the suppression walk, as a
+#: fraction of the separation. Half was measured against the exact walk: a third
+#: recovers another 12% of the yield for 40% more time, and using the whole
+#: separation is 25% faster again but throws away a third of the points.
+CANDIDATE_CELL_FRACTION = 2
+
+#: Thresholding rules. ``quality`` is the default and the one to reach for.
+#:
+#: ``percentile`` looks the most natural and is the least useful on a dense
+#: score image, because it ranks *pixels* and pixels are overwhelmingly
+#: background: on a typical frame the 90th percentile of the score is under
+#: 1/500th of the best feature, so nine tenths of the slider's travel is spent
+#: inside the featureless area and the whole selection collapses the moment you
+#: leave the top percentile. It is kept because it is the right rule for a
+#: lattice, where the candidates have already been spaced out.
+#:
+#: A third rule, a fraction of the literal maximum, was dropped: it is the same
+#: rule as ``quality`` with a reference that one dust mote can move, so on any
+#: frame worth using it is indistinguishable and on a bad one it is worse.
+THRESHOLD_MODES = ('quality', 'percentile')
 
 
 def threshold_value(score, mask=None, mode='percentile', value=DEFAULT_THRESHOLD):
@@ -54,8 +108,8 @@ def threshold_value(score, mask=None, mode='percentile', value=DEFAULT_THRESHOLD
     :param mask: boolean array restricting which scores are considered; ``None``
         considers the whole image
     :type mask: numpy.ndarray or None
-    :param mode: ``'percentile'`` (``value`` in 0..100) or ``'fraction'``
-        (``value`` in 0..1, as a fraction of the maximum)
+    :param mode: ``'quality'`` (``value`` in 0..1, as a fraction of the robust
+        maximum) or ``'percentile'`` (``value`` in 0..100)
     :type mode: str
     :param value: the threshold in the units ``mode`` implies
     :type value: float
@@ -81,7 +135,9 @@ def threshold_value(score, mask=None, mode='percentile', value=DEFAULT_THRESHOLD
             # select nothing at all at the loosest setting.
             return -np.inf
         return float(np.percentile(values, value))
-    return float(value) * float(values.max())
+    if value <= 0:
+        return -np.inf         # as for a zero percentile: keep everything
+    return float(value) * float(np.percentile(values, ROBUST_MAXIMUM_PERCENTILE))
 
 
 def _disc(radius):
@@ -90,23 +146,78 @@ def _disc(radius):
     return offsets[:, None] ** 2 + offsets[None, :] ** 2 <= radius * radius
 
 
-def _ordered_candidates(score, eligible):
+def _block_best(score, eligible, cell):
+    """The best eligible pixel in each ``cell`` x ``cell`` block of the image.
+
+    A cheap way to cut the candidate list down before the suppression walk. Cells
+    with nothing eligible in them contribute nothing, so a blank area costs no
+    points -- unlike a lattice, which places one wherever the grid falls.
+
+    :param score: score image, ``NaN`` where invalid
+    :type score: numpy.ndarray
+    :param eligible: boolean array of candidate positions
+    :type eligible: numpy.ndarray
+    :param cell: block size in pixels; must be at least 2
+    :type cell: int
+    :return: ``(rows, cols)`` of the winners, in row-major block order
+    :rtype: tuple[numpy.ndarray, numpy.ndarray]
+    """
+    height, width = score.shape
+    down, across = -(-height // cell), -(-width // cell)
+    # Pad to a whole number of blocks with -inf, so the padding can never win a
+    # block and the reshape needs no special case at the right and bottom edges.
+    padded = np.full((down * cell, across * cell), -np.inf, dtype=np.float32)
+    padded[:height, :width] = np.where(eligible, score, -np.inf)
+    blocks = padded.reshape(down, cell, across, cell).transpose(0, 2, 1, 3)
+    blocks = blocks.reshape(down, across, cell * cell)
+
+    within = blocks.argmax(-1)
+    best = np.take_along_axis(blocks, within[..., None], -1)[..., 0]
+    occupied = np.isfinite(best)
+    block_rows, block_cols = np.nonzero(occupied)
+    offset = within[occupied]
+    return block_rows * cell + offset // cell, block_cols * cell + offset % cell
+
+
+def _ordered_candidates(score, eligible, keep=None):
     """Candidate coordinates, best first, ties broken by row then column.
 
+    :param score: score image
+    :type score: numpy.ndarray
+    :param eligible: boolean array of candidate positions
+    :type eligible: numpy.ndarray
+    :param keep: sort only this many of the best candidates. Only safe when the
+        caller will accept them all, since a candidate below the cut can still
+        be accepted once suppression has rejected the ones above it.
+    :type keep: int or None
     :return: ``(rows, cols)`` arrays in acceptance order
     """
     rows, cols = np.nonzero(eligible)
     if not rows.size:
         return rows, cols
     values = score[rows, cols]
-    # lexsort's last key is primary: descending score, then ascending row,
-    # then ascending column -- so the result never depends on numpy's
-    # internal ordering and repeated calls agree exactly.
-    order = np.lexsort((cols, rows, -values))
+
+    if keep is not None and 0 < keep < rows.size:
+        # A loose threshold leaves hundreds of thousands of candidates and the
+        # sort dominates the whole selection, yet all but `keep` of them are
+        # discarded straight afterwards. Partitioning is linear, and taking
+        # everything tied with the worst survivor makes it exact: without that
+        # the tiebreak at the cut would fall to numpy's internal partition
+        # order instead of the row/column rule below.
+        cut = values[np.argpartition(-values, keep - 1)[:keep]].min()
+        head = np.flatnonzero(values >= cut)
+        rows, cols, values = rows[head], cols[head], values[head]
+
+    # np.nonzero returns its indices in row-major order, so the candidates
+    # arrive sorted by row and then by column already. A *stable* sort by
+    # descending score therefore leaves ties in that order -- the same result a
+    # three-key lexsort gives, for a third of the work, and just as independent
+    # of numpy's internal ordering.
+    order = np.argsort(-values, kind='stable')
     return rows[order], cols[order]
 
 
-def suppress(rows, cols, shape, min_distance, max_points=None, occupied=None):
+def suppress(rows, cols, shape, radius, max_points=None, occupied=None):
     """Greedy non-maximum suppression over candidates already in priority order.
 
     :param rows: candidate row coordinates, best first
@@ -115,9 +226,9 @@ def suppress(rows, cols, shape, min_distance, max_points=None, occupied=None):
     :type cols: numpy.ndarray
     :param shape: ``(rows, cols)`` of the image
     :type shape: tuple[int, int]
-    :param min_distance: minimum Euclidean distance between accepted points; 0
+    :param radius: no accepted point comes within this distance of another; 0
         accepts every candidate
-    :type min_distance: float
+    :type radius: float
     :param max_points: stop after this many; ``None`` for no limit
     :type max_points: int or None
     :param occupied: boolean array of positions already taken, e.g. by
@@ -126,42 +237,60 @@ def suppress(rows, cols, shape, min_distance, max_points=None, occupied=None):
     :return: accepted ``(row, col)`` coordinates, in acceptance order
     :rtype: list[tuple[int, int]]
     """
-    radius = int(min_distance)
+    radius = int(radius)
+    if radius <= 0:
+        # Nothing suppresses anything, so the walk is just "drop what is already
+        # taken, then cut to the cap" -- two array operations instead of twenty
+        # thousand trips round a Python loop.
+        if occupied is not None:
+            free = ~np.asarray(occupied, dtype=bool)[rows, cols]
+            rows, cols = rows[free], cols[free]
+        if max_points is not None and len(rows) > max_points:
+            rows, cols = rows[:max_points], cols[:max_points]
+        return list(zip(rows.tolist(), cols.tolist()))
+
     taken = np.zeros(shape, dtype=bool) if occupied is None else np.asarray(occupied, dtype=bool).copy()
-    disc = _disc(radius) if radius > 0 else None
+    disc = _disc(radius)
     height, width = shape
 
     accepted = []
-    for row, col in zip(rows.tolist(), cols.tolist()):
-        if taken[row, col]:
-            continue
-        accepted.append((row, col))
-        if max_points is not None and len(accepted) >= max_points:
-            break
-        if disc is None:
-            taken[row, col] = True
-            continue
-        r0, r1 = max(0, row - radius), min(height, row + radius + 1)
-        c0, c1 = max(0, col - radius), min(width, col + radius + 1)
-        taken[r0:r1, c0:c1] |= disc[r0 - row + radius:r1 - row + radius,
-                                    c0 - col + radius:c1 - col + radius]
+    for start in range(0, rows.size, SUPPRESS_CHUNK):
+        chunk_rows = rows[start:start + SUPPRESS_CHUNK]
+        chunk_cols = cols[start:start + SUPPRESS_CHUNK]
+        # Occupancy only ever grows, so a candidate that is already covered now
+        # would still be covered when its turn came: dropping the whole batch of
+        # them in one vectorised read is exact, and it is what keeps the Python
+        # loop off the great majority of candidates. A tight separation on
+        # a dense score image rejects better than nine in ten.
+        free = ~taken[chunk_rows, chunk_cols]
+        for row, col in zip(chunk_rows[free].tolist(), chunk_cols[free].tolist()):
+            if taken[row, col]:
+                continue                # taken by an earlier point in this chunk
+            accepted.append((row, col))
+            if max_points is not None and len(accepted) >= max_points:
+                return accepted
+            r0, r1 = max(0, row - radius), min(height, row + radius + 1)
+            c0, c1 = max(0, col - radius), min(width, col + radius + 1)
+            taken[r0:r1, c0:c1] |= disc[r0 - row + radius:r1 - row + radius,
+                                        c0 - col + radius:c1 - col + radius]
     return accepted
 
 
-def select_peaks(score, mask=None, min_distance=10, threshold=DEFAULT_THRESHOLD,
-                 threshold_mode='percentile', max_points=DEFAULT_MAX_POINTS, occupied=None):
-    """Pick the strongest well-separated subsets from a score image.
+def select_peaks(score, mask=None, separation=DEFAULT_SEPARATION, threshold=DEFAULT_THRESHOLD,
+                 threshold_mode='quality', max_points=DEFAULT_MAX_POINTS, occupied=None):
+    """Pick the strongest subsets from a score image, no two closer than ``separation``.
 
     :param score: score image, ``NaN`` where invalid
     :type score: numpy.ndarray
     :param mask: boolean array restricting where points may be placed; ``None``
         allows the whole image
     :type mask: numpy.ndarray or None
-    :param min_distance: minimum Euclidean distance between selected points
-    :type min_distance: float
+    :param separation: the distance, in pixels, no two selected points may come
+        closer than. 1 keeps every pixel above the threshold.
+    :type separation: int
     :param threshold: threshold in the units ``threshold_mode`` implies
     :type threshold: float
-    :param threshold_mode: ``'percentile'`` or ``'fraction'``
+    :param threshold_mode: one of :data:`THRESHOLD_MODES`
     :type threshold_mode: str
     :param max_points: keep at most this many, highest-scoring first
     :type max_points: int or None
@@ -177,12 +306,28 @@ def select_peaks(score, mask=None, min_distance=10, threshold=DEFAULT_THRESHOLD,
     if mask is not None:
         eligible &= mask
 
-    rows, cols = _ordered_candidates(score, eligible)
-    return suppress(rows, cols, score.shape, min_distance, max_points, occupied)
+    separation = max(1, int(separation))
+    if separation <= 1:
+        # Nothing to suppress, so there is no walk to feed and no reason to
+        # reduce anything: it is the pixels above the threshold, capped. What is
+        # already taken is dropped here rather than inside the walk, so that
+        # every remaining candidate is one that will be accepted -- which is
+        # what makes it safe to sort only the best `max_points` of them.
+        if occupied is not None:
+            eligible = eligible & ~np.asarray(occupied, dtype=bool)
+        rows, cols = _ordered_candidates(score, eligible, max_points)
+        return suppress(rows, cols, score.shape, 0, max_points)
+
+    # Two is the smallest cell that reduces anything, and the walk over an
+    # unreduced megapixel frame is 300 ms.
+    cell = max(2, separation // CANDIDATE_CELL_FRACTION)
+    rows, cols = _block_best(score, eligible, cell)
+    order = np.argsort(-score[rows, cols], kind='stable')
+    return suppress(rows[order], cols[order], score.shape, separation, max_points, occupied)
 
 
 def select_lattice(score, mask=None, pitch=12, threshold=DEFAULT_THRESHOLD,
-                   threshold_mode='percentile', max_points=DEFAULT_MAX_POINTS, occupied=None):
+                   threshold_mode='quality', max_points=DEFAULT_MAX_POINTS, occupied=None):
     """Pick subsets on a regular grid, optionally dropping the weak ones.
 
     Uniform sampling is not always the wrong answer -- for full-field work the
@@ -196,10 +341,10 @@ def select_lattice(score, mask=None, pitch=12, threshold=DEFAULT_THRESHOLD,
     :type mask: numpy.ndarray or None
     :param pitch: grid step, as a scalar or a ``(rows, cols)`` pair
     :type pitch: int or tuple
-    :param threshold: threshold in the units ``threshold_mode`` implies. Use a
-        percentile of 0 to keep every grid position with a finite score.
+    :param threshold: threshold in the units ``threshold_mode`` implies. Use 0
+        to keep every grid position with a finite score.
     :type threshold: float
-    :param threshold_mode: ``'percentile'`` or ``'fraction'``
+    :param threshold_mode: one of :data:`THRESHOLD_MODES`
     :type threshold_mode: str
     :param max_points: keep at most this many
     :type max_points: int or None
@@ -254,8 +399,8 @@ def select(score, mask=None, selector='peaks', occupied=None, **params):
     :type occupied: numpy.ndarray or None
     :param params: selector-specific parameters. Parameters this selector does
         not take are ignored rather than raising, so that one set of defaults --
-        ``min_distance`` for ``peaks``, ``pitch`` for ``lattice`` -- can be
-        carried around and handed to either.
+        ``separation`` for ``peaks``, ``pitch`` for ``lattice`` -- can be carried
+        around and handed to either.
     :return: ``(n_points, 2)`` integer array of ``(row, col)`` coordinates
     :rtype: numpy.ndarray
     :raises ValueError: if ``selector`` is not a known selector
@@ -285,13 +430,19 @@ def as_point_array(points):
 
 
 def decimate(points, stride=None, count=None):
-    """Thin a list of unscored coordinates, keeping their order.
+    """Thin a list of coordinates, keeping their order.
 
-    Scored points are better thinned by the minimum distance in
-    :func:`select_peaks`, which keeps the *best* point in each neighbourhood.
-    This is for coordinates that carry no score -- a hand-placed line, say --
-    where there is nothing to rank by and even spacing through the sequence is
-    the only sensible answer.
+    This drops points that were already chosen. It is not the same as asking
+    for fewer points up front: a wider separation re-selects, moving every point,
+    whereas decimation leaves the survivors exactly where they were and simply
+    keeps fewer of them. That is what you want when the selection is right and
+    only the count is too high for the computation you are about to run -- and it
+    is why the two are separate controls. It is also why it is not the separation
+    control: it thins a list, and a list thinned by score puts most of what
+    survives back-to-back on the same feature.
+
+    ``select_peaks`` returns its points best first, so a stride keeps an even
+    sample across the whole quality range rather than the top slice of it.
 
     :param points: ``(row, col)`` coordinates
     :type points: sequence
@@ -329,42 +480,53 @@ def merge_points(literal, picked):
     :return: ``(n_points, 2)`` integer array
     :rtype: numpy.ndarray
     """
-    seen = set()
-    merged = []
-    for point in list(literal) + list(picked):
-        key = (int(point[0]), int(point[1]))
-        if key in seen:
-            continue
-        seen.add(key)
-        merged.append(key)
-    return as_point_array(merged)
+    combined = np.vstack([as_point_array(literal), as_point_array(picked)])
+    if not len(combined):
+        return combined
+    # Deduplicating through a Python set costs more than the selection itself at
+    # twenty thousand points. Folding each coordinate pair into one integer makes
+    # it a single `unique`, and sorting the indices it returns puts the survivors
+    # back in the order they arrived -- which is the part `unique` alone loses.
+    # The fold is taken relative to the lowest coordinate, so that it stays
+    # one-to-one even if a caller hands in a negative one.
+    low_row, low_col = int(combined[:, 0].min()), int(combined[:, 1].min())
+    span = int(combined[:, 1].max()) - low_col + 1
+    flat = (combined[:, 0] - low_row) * span + (combined[:, 1] - low_col)
+    keep = np.sort(np.unique(flat, return_index=True)[1])
+    return combined[keep]
 
 
-def occupancy(points, shape, min_distance):
+def occupancy(points, shape, radius):
     """Positions blocked by an existing set of points.
 
     Used to give hand-picked points precedence: the selector is handed this
-    array and cannot place anything within ``min_distance`` of one of them.
+    array and cannot place anything within ``radius`` of one of them.
 
     :param points: ``(row, col)`` coordinates
     :type points: sequence
     :param shape: ``(rows, cols)`` of the image
     :type shape: tuple[int, int]
-    :param min_distance: radius blocked around each point
-    :type min_distance: float
+    :param radius: radius blocked around each point
+    :type radius: float
     :return: boolean array indexed ``[row, col]``
     :rtype: numpy.ndarray
     """
     taken = np.zeros(shape, dtype=bool)
-    radius = int(min_distance)
+    radius = int(radius)
     height, width = shape
-    disc = _disc(radius) if radius > 0 else None
+    points = as_point_array(points)
+    if radius <= 0:
+        # Nothing to stamp but the points themselves, so the whole thing is one
+        # indexed assignment rather than a Python step per point.
+        rows, cols = points[:, 0], points[:, 1]
+        inside = (rows >= 0) & (rows < height) & (cols >= 0) & (cols < width)
+        taken[rows[inside], cols[inside]] = True
+        return taken
+
+    disc = _disc(radius)
     for point in points:
         row, col = int(point[0]), int(point[1])
         if not (0 <= row < height and 0 <= col < width):
-            continue
-        if disc is None:
-            taken[row, col] = True
             continue
         r0, r1 = max(0, row - radius), min(height, row + radius + 1)
         c0, c1 = max(0, col - radius), min(width, col + radius + 1)

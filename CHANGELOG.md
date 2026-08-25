@@ -31,30 +31,133 @@ The three steps are separated, and only the middle one is expensive:
   a role: `mask` rows contribute their area, `points` rows contribute
   coordinates that bypass scoring entirely, and the role is switchable per row.
   Hand-picked points always survive whatever their score, and no automatic
-  point is placed within the minimum distance of one.
+  point is placed within the separation of one.
 - **evaluate** — Shi-Tomasi and gradient-in-direction, computed over the whole
   image, with `NaN` marking the border where the subset window would leave it.
   Scores are named and cached on (evaluator, parameters, subset size), so
   several coexist and switching between them is free the second time.
   Evaluators are a registry: a new one is a function plus parameter
   descriptors, and it appears in the menu with no GUI change.
-- **select** — threshold (by percentile, or by fraction of the maximum) plus
-  greedy minimum-distance suppression. A bare threshold on a dense score image
-  returns a solid blob of adjacent pixels on every corner, so the suppression
-  is what makes the result a set of features. A `lattice` selector reproduces
-  regular grid sampling inside the same pipeline, for full-field work where
-  even coverage matters more than feature strength.
+- **select** — a threshold plus a **separation**: the distance no two points
+  may come closer than, which is the one control for how many you get. A bare
+  threshold on a dense score image returns a solid blob of adjacent pixels on
+  every corner, so the separation is what makes the result a set of features.
+  A `lattice` selector reproduces regular grid sampling inside the same
+  pipeline, for full-field work where even coverage matters more than feature
+  strength.
+
+The threshold is a **quality**: a fraction of the best feature in the region,
+so 0.01 means "at least a hundredth as good as the best one here", on a
+logarithmic slider because the useful settings span three decades. A percentile
+ranks *pixels*, and on a dense score image the pixels are overwhelmingly
+background — on a typical frame its 90th percentile is under a five-hundredth
+of the best feature, so nine tenths of a percentile slider's travel sits inside
+the featureless area and lowering it floods the frame with background rather
+than admitting weaker features. The reference is the 99.9th percentile of the
+scores rather than their maximum, so one specular highlight cannot drag every
+useful setting into the floor of the slider. `percentile of scores` remains
+available, and is the right rule for the `lattice` selector, whose candidates
+are already spaced out. A third rule, a fraction of the literal maximum, was
+offered and then dropped: it is quality with a reference one bright pixel can
+move, so on any usable frame it is indistinguishable and on a bad one worse.
+
+**Decimation** thins the points that were already selected — every n-th,
+survivors left exactly where they are — for when the selection is right and
+only the count is too high for the computation about to run. Widening the
+separation re-selects and moves every point, which is a different thing, so the
+two are separate controls. Hand-placed points are never decimated, and what a
+region selected is recorded as occupied before it is thinned, so decimating one
+region leaves gaps rather than inviting another to fill them.
+
+Decimation is deliberately not the density control, because thinning the pixels
+above the threshold that way does not work. On a 1024×1024 frame with 357 000
+of them, thinned to twenty thousand points, keeping every n-th in score order
+leaves 78 % of the subsets within three pixels of another one and keeping every
+n-th in scan order 92 %; the separation leaves none. Score order fails because
+consecutive ranks are neighbours on the same feature, scan order because the
+stride aliases against the row length.
+
+The **point cap** now says when it is what stopped the selection. It had no
+other symptom — it simply stopped adding points, and since it keeps the
+highest-scoring ones, a selection that hit it looked like a tight cluster on
+the strongest features and read as though the threshold or the spacing had
+caused it.
+
+Selection is fast enough to drive from a slider. The exact greedy walk is
+linear in the candidates, and a loose threshold leaves hundreds of thousands
+of them — 40 ms to 300 ms depending on the separation, which nothing can drag.
+So the candidates are reduced first, to the best pixel in each cell of a grid
+half the separation across. That costs yield and not the guarantee: at a
+separation of 11 it finds 1708 points where the exact walk finds 2193, in 9 ms
+instead of 39, and the walk still runs so the separation still holds exactly.
+
+The rest of the redraw was Python loops over the points rather than the
+selection itself. Vectorised — deduplication through one `unique` over folded
+coordinates, per-entry crediting through one mask lookup each, occupancy
+through one indexed assignment — and with each entry's rasterisation cached
+against a fingerprint of its geometry, the pipeline half of a redraw at 20 000
+points on a megapixel frame went from 46 ms to 21 ms. Earlier in the same work
+a redraw stopped running the selection three times over.
+
+What is left is drawing, so redraws are **coalesced**: while one costs less
+than a frame it still happens immediately, and above that the requests collapse
+into a single deferred redraw carrying the latest values. A fast drag therefore
+repaints as often as it can rather than queueing every position on the way, and
+lands on the value the control stopped at.
 
 Because a mask or threshold edit only re-derives from a cached score, the
 interface updates while a slider is still moving; only a subset-size or
 evaluator change recomputes.
 
+The window presents this as **two** tabs, not three, and deliberately does not
+number them. Evaluation does not depend on the mask, so mask and evaluate are
+siblings feeding select rather than a sequence. The tabs are named for the
+steps they hold: `Evaluate + select` holds the evaluator and the selection
+controls together, since changing one changes what the other means; `Mask` is
+where the candidates get trimmed. The selections list is on the `Mask` tab and
+only there — every row in it, and every button under it, acts on something
+drawn there — while the subset size stays on both, because both steps read it. The selections
+list starts with a `Whole image` row, so points are on screen the moment the
+window opens and masking is editing rather than a precondition. That row is
+ordinary — uncheck it, paint it away, or delete it, and deleting it selects
+nothing rather than reverting to the whole frame. Since mask rows combine as a
+union, drawing your own region unchecks it, so the region restricts the
+selection instead of being absorbed into a union that changes nothing.
+`Clear all` starts over rather than clearing to nothing: it seeds that row
+again, so the whole frame is selected, as when the window opened.
+
+While masking, the points are shown in three tiers, because "no point here"
+otherwise means two different things: red for a point being taken, dim blue for
+a feature the mask is leaving out, and a magenta ring for the points the
+selected row accounts for. The dim tier is the whole-frame selection, so it
+does not move while a mask is edited — painting a region turns points from blue
+to red where it lands rather than re-selecting underneath you — and it is
+cached across mask edits, which is what keeps it affordable: about a fifth
+added to a redraw on that tab.
+
+The subset size takes odd values only, by stepping and by typing: a subset is
+centred on its point, so an even extent has no centre to be, and the pipeline
+reads one as the odd size below it in any case — a subset size of 10 scores
+through an 11-pixel window and draws an 11-pixel rectangle — so the even values
+were a second spelling of the odd ones. It sits below the tabs rather than on
+one of them: the scoring window follows it, which is what makes it one of the few settings that stales
+the cached score, and it is also the size of the rectangle drawn round each
+point while masking. `Show score overlay` is on both tabs and the two controls
+stay in step. Control groups are flat rather than nested, settings the current
+selector does not read are hidden rather than greyed out, and the descriptive
+paragraphs are tooltips -- between them they were most of a panel that was
+narrow enough to clip its own values. A direction
+can be dragged out on the image, as in `SelectionGUI`, as well as typed or
+taken from the `X`/`Y` presets, and a line shows the direction in force.
+Points under a deselect stroke are crossed out while the stroke is being
+painted, rather than only disappearing once the mouse comes up.
+
 The pipeline imports without Qt and is usable from a script through
 `pyidi.selection.select_points` (one call) or `SelectionPipeline` (keeps the
 score cache alive across parameter changes).
 
-`Remove point` takes the point's whole reserved disc — its minimum distance —
-out of the mask, not the single pixel under the click. A selected point is re-derived
+`Remove point` takes the point's whole reserved disc — its separation — out of
+the mask, not the single pixel under the click. A selected point is re-derived
 from the score on every run, so erasing one pixel just promotes its neighbour
 and the point reappears a couple of pixels along. Removing one is undoable, as
 every other edit is. Hand-placed points are still deleted outright, so clicking
@@ -80,6 +183,10 @@ the fifty slots.
 Ctrl is read off the mouse event rather than tracked by a key filter on the
 window, which a panel widget with focus can swallow; letting go of Ctrl
 part-way through a stroke finishes the stroke rather than abandoning it.
+
+Changing an evaluator parameter goes through the same coalescing as every other
+control. It is the one control that can make a redraw expensive, since a
+parameter not scored before is a whole-frame evaluation.
 
 **Scores differ slightly from the old per-subset filter near strong edges.**
 `SelectionGUI` ran Sobel on the isolated subset, so gradients at the subset

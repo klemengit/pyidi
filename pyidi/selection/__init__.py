@@ -8,14 +8,14 @@ Three steps, none of which needs a GUI:
   pixel of the image at once, cached by name in
   :mod:`~pyidi.selection.scores`;
 - **select** (:mod:`~pyidi.selection.select`) -- a selector turns score plus
-  mask into points, with a threshold and a minimum distance between them.
+  mask into points, with a threshold and a separation between them.
 
 The quick way in::
 
     from pyidi.selection import Entry, select_points
 
     region = Entry('polygon', [(20, 20), (20, 200), (180, 200), (180, 20)])
-    points = select_points(image, [region], subset_size=11, min_distance=15)
+    points = select_points(image, [region], subset_size=11, separation=15)
 
 and the stateful way, when scores should be reused across many parameter
 changes::
@@ -57,7 +57,10 @@ from .pipeline import DEFAULT_SELECTOR_PARAMS, PRETTY, SelectionPipeline, select
 from .scores import ScoreSpec, ScoreStore
 from .select import (
     DEFAULT_MAX_POINTS,
+    DEFAULT_SEPARATION,
     DEFAULT_THRESHOLD,
+    ROBUST_MAXIMUM_PERCENTILE,
+    THRESHOLD_MODES,
     SELECTORS,
     as_point_array,
     decimate,
@@ -72,9 +75,12 @@ from .select import (
 
 __all__ = [
     'DEFAULT_MAX_POINTS',
+    'DEFAULT_SEPARATION',
     'DEFAULT_ROLE',
     'DEFAULT_SELECTOR_PARAMS',
     'DEFAULT_THRESHOLD',
+    'ROBUST_MAXIMUM_PERCENTILE',
+    'THRESHOLD_MODES',
     'Entry',
     'Evaluator',
     'PRETTY',

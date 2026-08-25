@@ -43,6 +43,8 @@ from pyidi.selection import (
     select,
     select_lattice,
     select_peaks,
+    ROBUST_MAXIMUM_PERCENTILE,
+    THRESHOLD_MODES,
     select_points,
     threshold_value,
     window_size,
@@ -455,17 +457,18 @@ def test_deselection_drops_covered_literal_points():
 def test_percentile_threshold_keeps_the_top_decile(speckle):
     score = evaluate(speckle, 'shi_tomasi', 11)
     limit = threshold_value(score, None, 'percentile', 90)
-    points = select_peaks(score, min_distance=0, threshold=90, max_points=None)
+    points = select_peaks(score, separation=1, threshold=90,
+                          threshold_mode='percentile', max_points=None)
     assert points
     assert all(score[r, c] > limit for r, c in points)
 
 
-def test_fraction_threshold_is_relative_to_the_maximum(speckle):
+def test_the_fraction_of_the_maximum_rule_is_gone(speckle):
+    """It was `quality` with a reference one dust mote could move."""
     score = evaluate(speckle, 'shi_tomasi', 11)
-    peak = np.nanmax(score)
-    points = select_peaks(score, min_distance=0, threshold=0.5,
-                          threshold_mode='fraction', max_points=None)
-    assert all(score[r, c] > 0.5 * peak for r, c in points)
+    assert 'fraction' not in THRESHOLD_MODES
+    with pytest.raises(ValueError, match='fraction'):
+        threshold_value(score, None, 'fraction', 0.5)
 
 
 def test_an_unreachable_threshold_returns_an_empty_array(speckle):
@@ -485,7 +488,7 @@ def test_an_unknown_threshold_mode_is_rejected(speckle):
 # select -- suppression
 # ---------------------------------------------------------------------------
 
-def pairwise_min_distance(points):
+def pairwise_separation(points):
     """Smallest distance between any two points, or ``inf`` for fewer than two."""
     points = np.asarray(points, dtype=float)
     if len(points) < 2:
@@ -496,25 +499,26 @@ def pairwise_min_distance(points):
     return distance.min()
 
 
-def test_minimum_distance_is_respected(speckle):
+def test_the_separation_is_respected(speckle):
     score = evaluate(speckle, 'shi_tomasi', 11)
-    points = select_peaks(score, min_distance=10, threshold=50)
+    points = select_peaks(score, separation=10, threshold=50, threshold_mode='percentile')
     assert len(points) > 5
-    assert pairwise_min_distance(points) >= 10
+    assert pairwise_separation(points) >= 10
 
 
-def test_zero_minimum_distance_keeps_every_candidate(speckle):
+def test_a_separation_of_one_keeps_every_candidate(speckle):
     score = evaluate(speckle, 'shi_tomasi', 11)
     limit = threshold_value(score, None, 'percentile', 99)
-    points = select_peaks(score, min_distance=0, threshold=99, max_points=None)
+    points = select_peaks(score, separation=1, threshold=99,
+                          threshold_mode='percentile', max_points=None)
     assert len(points) == int((score > limit).sum())
 
 
 def test_the_strongest_candidate_in_a_neighbourhood_wins():
     score = np.zeros((40, 40), dtype=np.float32)
     score[20, 20] = 5.0
-    score[20, 23] = 9.0             # closer than min_distance, and stronger
-    points = select_peaks(score, min_distance=8, threshold=0, max_points=None)
+    score[20, 23] = 9.0             # closer than the separation, and stronger
+    points = select_peaks(score, separation=8, threshold=0, max_points=None)
     assert (20, 23) in points
     assert (20, 20) not in points
 
@@ -523,15 +527,18 @@ def test_a_dense_blob_yields_one_point():
     score = np.zeros((60, 60), dtype=np.float32)
     rows, cols = np.mgrid[0:60, 0:60]
     score += np.exp(-((rows - 30.0) ** 2 + (cols - 30.0) ** 2) / 40.0).astype(np.float32)
-    points = select_peaks(score, min_distance=5, threshold=99, max_points=None)
+    points = select_peaks(score, separation=5, threshold=99,
+                          threshold_mode='percentile', max_points=None)
     near = [p for p in points if abs(p[0] - 30) <= 5 and abs(p[1] - 30) <= 5]
     assert len(near) == 1
 
 
 def test_the_point_cap_is_applied(speckle):
     score = evaluate(speckle, 'shi_tomasi', 11)
-    many = select_peaks(score, min_distance=3, threshold=50, max_points=None)
-    capped = select_peaks(score, min_distance=3, threshold=50, max_points=5)
+    many = select_peaks(score, separation=3, threshold=50,
+                        threshold_mode='percentile', max_points=None)
+    capped = select_peaks(score, separation=3, threshold=50,
+                          threshold_mode='percentile', max_points=5)
     assert len(many) > 5
     assert len(capped) == 5
     assert capped == many[:5]
@@ -539,8 +546,8 @@ def test_the_point_cap_is_applied(speckle):
 
 def test_results_are_deterministic(speckle):
     score = evaluate(speckle, 'shi_tomasi', 11)
-    first = select(score, selector='peaks', min_distance=7, threshold=80)
-    second = select(score, selector='peaks', min_distance=7, threshold=80)
+    first = select(score, selector='peaks', separation=7, threshold=80, threshold_mode='percentile')
+    second = select(score, selector='peaks', separation=7, threshold=80, threshold_mode='percentile')
     np.testing.assert_array_equal(first, second)
 
 
@@ -548,8 +555,8 @@ def test_ties_are_broken_by_position():
     score = np.zeros((40, 40), dtype=np.float32)
     score[10, 20] = 1.0
     score[12, 15] = 1.0             # equal score, larger row -- must lose
-    points = select_peaks(score, min_distance=9, threshold=0.5,
-                          threshold_mode='fraction', max_points=None)
+    points = select_peaks(score, separation=9, threshold=0.5,
+                          threshold_mode='quality', max_points=None)
     assert points == [(10, 20)]
 
 
@@ -557,46 +564,118 @@ def test_selected_points_stay_inside_the_mask(speckle):
     score = evaluate(speckle, 'shi_tomasi', 11)
     mask = np.zeros(speckle.shape, dtype=bool)
     mask[30:90, 30:90] = True
-    points = select_peaks(score, mask=mask, min_distance=6, threshold=50)
+    points = select_peaks(score, mask=mask, separation=6, threshold=50,
+                          threshold_mode='percentile')
     assert points
     assert all(mask[r, c] for r, c in points)
 
 
 def test_the_nan_border_is_never_selected(speckle):
     score = evaluate(speckle, 'shi_tomasi', 11)
-    points = select_peaks(score, min_distance=4, threshold=10)
+    points = select_peaks(score, separation=4, threshold=10, threshold_mode='percentile')
     assert all(np.isfinite(score[r, c]) for r, c in points)
 
 
-def test_suppression_stays_interactive_on_a_dense_score_image():
-    """The greedy walk is exact, so its cost is the thing worth pinning.
+def test_selection_stays_interactive_on_a_dense_score_image():
+    """A threshold drag re-selects on every step, so the whole thing is the budget.
 
-    A 90th-percentile threshold on a megapixel frame leaves ~10^5 candidates.
-    The walk is affordable because rejecting one is a single array lookup and
-    only the few thousand accepted points pay for a disc stamp.
+    A loose threshold on a megapixel frame leaves ~10^5 pixels above it. Walking
+    them all is 40 ms to 300 ms depending on the separation, which is why the
+    candidates are reduced to the best in each cell first.
     """
     import time
-
-    from pyidi.selection.select import _ordered_candidates, suppress
 
     rng = np.random.default_rng(3)
     big = rng.integers(0, 255, (1000, 1000)).astype(np.uint16)
     score = evaluate(big, 'shi_tomasi', 11)
-    rows, cols = _ordered_candidates(score, score > threshold_value(score, None, 'percentile', 90))
-    assert len(rows) > 50000
+    assert (score > threshold_value(score, None, 'percentile', 90)).sum() > 50000
 
     start = time.perf_counter()
-    points = suppress(rows, cols, score.shape, 10, None, None)
+    points = select_peaks(score, separation=10, threshold=90, threshold_mode='percentile',
+                          max_points=None)
     elapsed = time.perf_counter() - start
     assert len(points) > 100
-    assert elapsed < 1.0, f'suppression took {elapsed:.3f} s'
+    assert elapsed < 0.1, f'selection took {elapsed * 1000:.0f} ms'
+
+
+def test_the_candidate_reduction_does_not_break_the_separation():
+    """The cell grid is an approximation of the walk's input, never of its rule."""
+    from pyidi.selection.select import CANDIDATE_CELL_FRACTION
+
+    rng = np.random.default_rng(5)
+    score = rng.random((300, 400)).astype(np.float32)
+    for separation in (2, 4, 11, 30):
+        points = np.array(select_peaks(score, separation=separation, threshold=0.5,
+                                       threshold_mode='quality', max_points=None))
+        assert len(points) > 10
+        assert pairwise_separation(points) >= separation
+        # ...and it really did reduce, wherever the cell is worth having
+        if separation // CANDIDATE_CELL_FRACTION > 1:
+            assert len(points) < (score > threshold_value(score, None, 'quality', 0.5)).sum()
+
+
+def test_the_cell_grid_keeps_the_best_pixel_in_each_cell():
+    from pyidi.selection.select import _block_best
+
+    score = np.zeros((12, 12), dtype=np.float32)
+    score[1, 1] = 1.0
+    score[2, 2] = 5.0               # same 4x4 cell, stronger -- it should win
+    score[9, 5] = 3.0
+    rows, cols = _block_best(score, score > 0, 4)
+    assert set(zip(rows.tolist(), cols.tolist())) == {(2, 2), (9, 5)}
+
+
+def test_a_cell_with_nothing_eligible_contributes_nothing():
+    """Unlike a lattice, which puts a point wherever the grid happens to fall."""
+    from pyidi.selection.select import _block_best
+
+    score = np.zeros((20, 20), dtype=np.float32)
+    score[3, 3] = 1.0
+    rows, _ = _block_best(score, score > 0, 5)
+    assert len(rows) == 1
+
+
+def nearest_neighbour(points):
+    """Distance from each point to its closest other point."""
+    points = np.asarray(points, dtype=float)
+    diff = points[:, None, :] - points[None, :, :]
+    distance = np.hypot(diff[..., 0], diff[..., 1])
+    np.fill_diagonal(distance, np.inf)
+    return distance.min(axis=1)
+
+
+def test_keeping_every_nth_is_not_a_substitute_for_the_separation():
+    """The measurement the separation control exists because of.
+
+    Thinning the pixels above the threshold by keeping every n-th of them, in
+    score order, is the obvious thing to reach for and it does not work:
+    consecutive ranks are neighbours on the same feature, so most of what
+    survives is still back-to-back with something else. On this noise field it
+    leaves two fifths of the subsets within three pixels of another, and on a
+    structured frame -- where the strong scores really are concentrated on a few
+    features -- three quarters. The separation leaves none.
+    """
+    rng = np.random.default_rng(7)
+    image = rng.integers(0, 255, (300, 300)).astype(np.uint16)
+    score = evaluate(image, 'shi_tomasi', 11)
+    rows, cols = np.nonzero(score > threshold_value(score, None, 'quality', 0.05))
+    order = np.argsort(-score[rows, cols], kind='stable')
+    stride = max(2, rows.size // 2000)
+
+    ranked = np.column_stack([rows[order][::stride], cols[order][::stride]])
+    spaced = np.array(select_peaks(score, separation=6, threshold=0.05,
+                                   threshold_mode='quality', max_points=None))
+
+    assert (nearest_neighbour(ranked) < 3).mean() > 0.4
+    assert (nearest_neighbour(spaced) < 3).mean() == 0
+    assert pairwise_separation(spaced) >= 6
 
 
 def test_a_zero_percentile_threshold_keeps_everything():
     """A slider at its loosest setting must not select nothing."""
     score = np.ones((40, 40), dtype=np.float32)
     assert threshold_value(score, None, 'percentile', 0) == -np.inf
-    assert len(select_peaks(score, min_distance=0, threshold=0, max_points=None)) == 1600
+    assert len(select_peaks(score, separation=1, threshold=0, max_points=None)) == 1600
 
 
 # ---------------------------------------------------------------------------
@@ -615,7 +694,7 @@ def test_lattice_places_points_on_a_regular_grid():
 def test_lattice_honours_the_threshold():
     score = np.ones((60, 60), dtype=np.float32)
     score[24, :] = 0.0
-    points = select_lattice(score, pitch=12, threshold=0.5, threshold_mode='fraction',
+    points = select_lattice(score, pitch=12, threshold=0.5, threshold_mode='quality',
                             max_points=None)
     assert not any(r == 24 for r, _ in points)
     assert any(r == 12 for r, _ in points)
@@ -630,7 +709,7 @@ def test_unknown_selector_is_rejected(speckle):
 def test_selector_ignores_parameters_it_does_not_take(speckle):
     """One set of defaults has to be usable with either selector."""
     score = evaluate(speckle, 'shi_tomasi', 11)
-    points = select(score, selector='lattice', pitch=10, min_distance=99, threshold=0)
+    points = select(score, selector='lattice', pitch=10, separation=99, threshold=0)
     assert len(points) > 0
 
 
@@ -660,7 +739,7 @@ def test_literal_points_survive_a_low_score():
     score = np.zeros((60, 60), dtype=np.float32)
     score[40, 40] = 10.0
     literal = [(10, 10)]
-    picked = select_peaks(score, min_distance=5, threshold=99, max_points=None,
+    picked = select_peaks(score, separation=5, threshold=99, threshold_mode='percentile', max_points=None,
                           occupied=occupancy(literal, score.shape, 5))
     merged = merge_points(literal, picked)
     assert (merged == np.array([10, 10])).all(axis=1).any()
@@ -669,7 +748,7 @@ def test_literal_points_survive_a_low_score():
 def test_selection_never_crowds_a_literal_point():
     score = np.ones((60, 60), dtype=np.float32)
     literal = [(30, 30)]
-    picked = select_peaks(score, min_distance=8, threshold=0, max_points=None,
+    picked = select_peaks(score, separation=8, threshold=0, max_points=None,
                           occupied=occupancy(literal, score.shape, 8))
     assert all(np.hypot(r - 30, c - 30) >= 8 for r, c in picked)
 
@@ -691,7 +770,7 @@ def test_as_point_array_of_nothing_is_shaped_for_indexing():
 
 def test_end_to_end_returns_points_inside_the_polygon(image):
     entry = Entry('polygon', rect(100, 100, 150, 190))
-    points = select_points(image, [entry], subset_size=11, min_distance=8)
+    points = select_points(image, [entry], subset_size=11, separation=8)
     assert len(points) > 5
     assert points.dtype.kind == 'i'
     assert points.shape[1] == 2
@@ -717,7 +796,7 @@ def test_mask_edits_do_not_re_evaluate(image):
     assert evaluations == 1
 
     entry.geometry = rect(105, 105, 145, 185)
-    pipeline.selector_params['threshold'] = 95
+    pipeline.selector_params.update({'threshold': 95, 'threshold_mode': 'percentile'})
     pipeline.get_points()
     assert pipeline.store.n_evaluations == evaluations
 
@@ -749,18 +828,18 @@ def test_per_entry_settings_are_honoured(image):
     pipeline = SelectionPipeline(image, subset_size=11)
     loose = pipeline.add_entry('polygon', rect(100, 100, 125, 190))
     tight = pipeline.add_entry('polygon', rect(126, 100, 150, 190))
-    loose.selector_params = {'min_distance': 4, 'threshold': 50}
-    tight.selector_params = {'min_distance': 20, 'threshold': 50}
+    loose.selector_params = {'separation': 4, 'threshold': 50, 'threshold_mode': 'percentile'}
+    tight.selector_params = {'separation': 20, 'threshold': 50, 'threshold_mode': 'percentile'}
 
     points = pipeline.get_points()
     in_loose = points[points[:, 0] <= 125]
     in_tight = points[points[:, 0] >= 126]
     assert len(in_loose) > len(in_tight)
-    assert pairwise_min_distance(in_tight) >= 20
+    assert pairwise_separation(in_tight) >= 20
 
 
 def test_uniform_per_entry_settings_equal_global_settings(image):
-    shared = {'min_distance': 9, 'threshold': 70}
+    shared = {'separation': 9, 'threshold': 70, 'threshold_mode': 'percentile'}
 
     globally = SelectionPipeline(image, subset_size=11)
     globally.add_entry('polygon', rect(100, 100, 150, 190))
@@ -773,21 +852,23 @@ def test_uniform_per_entry_settings_equal_global_settings(image):
     np.testing.assert_array_equal(globally.get_points(), per_entry.get_points())
 
 
-def test_entries_sharing_settings_compete_for_the_same_minimum_distance(image):
+def test_entries_sharing_settings_compete_for_the_same_separation(image):
     """Two adjacent regions filtered alike must not place points on their shared edge."""
     pipeline = SelectionPipeline(image, subset_size=11)
     pipeline.add_entry('polygon', rect(100, 100, 124, 190))
     pipeline.add_entry('polygon', rect(125, 100, 150, 190))
-    pipeline.selector_params.update({'min_distance': 12, 'threshold': 40})
+    pipeline.selector_params.update({'separation': 12, 'threshold': 40,
+                                    'threshold_mode': 'percentile'})
     points = pipeline.get_points()
-    assert pairwise_min_distance(points) >= 12
+    assert pairwise_separation(points) >= 12
 
 
 def test_literal_and_selected_points_combine(image):
     pipeline = SelectionPipeline(image, subset_size=11)
     pipeline.add_entry('polygon', rect(100, 100, 150, 190))
     pipeline.add_entry('points', [(60, 60)])
-    pipeline.selector_params.update({'min_distance': 8, 'threshold': 60})
+    pipeline.selector_params.update({'separation': 8, 'threshold': 60,
+                                    'threshold_mode': 'percentile'})
     points = pipeline.get_points()
     assert (points == np.array([60, 60])).all(axis=1).any()
     assert len(points) > 1
@@ -824,7 +905,7 @@ def test_output_is_accepted_by_a_method_class(image, tmp_path):
     from pyidi import SimplifiedOpticalFlow, VideoReader
 
     entry = Entry('polygon', rect(100, 100, 150, 190))
-    points = select_points(image, [entry], subset_size=11, min_distance=10)
+    points = select_points(image, [entry], subset_size=11, separation=10)
     assert len(points)
 
     video = VideoReader(np.stack([image, image]).astype(np.uint16), root=str(tmp_path))
@@ -833,6 +914,245 @@ def test_output_is_accepted_by_a_method_class(image, tmp_path):
         warnings.simplefilter('error')
         method.set_points(points)
     np.testing.assert_array_equal(method.points, points)
+
+
+# ---------------------------------------------------------------------------
+# select -- the quality threshold
+#
+# The rule the interface defaults to, and the reason it does. A percentile
+# ranks *pixels*, and on a dense score image the pixels are overwhelmingly
+# background, so most of a percentile slider's travel is spent inside the
+# featureless area. Quality is measured against the best feature instead.
+# ---------------------------------------------------------------------------
+
+def flat_with_corners():
+    """A frame like a real one: mostly blank, a few strong features, sensor noise."""
+    img = np.full((200, 300), 240, dtype=np.uint8)
+    corners = np.zeros(img.shape, dtype=bool)
+    for row in range(40, 180, 60):
+        for col in range(40, 280, 60):
+            img[row:row + 20, col:col + 20] = 20
+            corners[row - 9:row + 29, col - 9:col + 29] = True
+    noise = np.random.default_rng(3).integers(-5, 6, img.shape)
+    return np.clip(img.astype(int) + noise, 0, 255).astype(np.uint8), corners
+
+
+def test_quality_is_a_fraction_of_the_robust_maximum(speckle):
+    score = evaluate(speckle, 'shi_tomasi', 11)
+    robust = np.nanpercentile(score, ROBUST_MAXIMUM_PERCENTILE)
+    assert threshold_value(score, None, 'quality', 0.25) == pytest.approx(0.25 * robust)
+
+
+def test_a_lone_outlier_barely_moves_the_quality_scale():
+    """A specular highlight must not drag every useful setting into the slider's floor.
+
+    This is the whole difference between `quality` and taking a fraction of the
+    literal maximum, which is why the latter is not offered: on this score image
+    it moves by a factor of fifty where quality moves by 2%.
+    """
+    score = np.random.default_rng(0).random((200, 300))
+    before = threshold_value(score, None, 'quality', 0.1)
+    literal_before = 0.1 * score.max()
+
+    score[100, 150] = 500.0                     # one absurdly bright pixel
+    assert threshold_value(score, None, 'quality', 0.1) == pytest.approx(before, rel=0.02)
+    assert 0.1 * score.max() > 50 * literal_before
+
+
+def test_a_zero_quality_keeps_everything():
+    score = np.zeros((40, 40))
+    assert threshold_value(score, None, 'quality', 0) == -np.inf
+
+
+def test_quality_keeps_the_points_off_the_blank_background():
+    """The headline behaviour: the whole slider stays inside the useful range."""
+    image, corners = flat_with_corners()
+    score = evaluate(image, 'shi_tomasi', 11)
+
+    for quality in (0.5, 0.1, 0.01):
+        points = np.array(select_peaks(score, separation=8, threshold=quality,
+                                       threshold_mode='quality', max_points=None))
+        assert len(points)
+        assert corners[points[:, 0], points[:, 1]].all(), quality
+
+
+def test_a_percentile_threshold_does_not():
+    """Why the default changed: the same frame, ranked by pixel instead."""
+    image, corners = flat_with_corners()
+    score = evaluate(image, 'shi_tomasi', 11)
+
+    points = np.array(select_peaks(score, separation=8, threshold=50,
+                                   threshold_mode='percentile', max_points=None))
+    assert corners[points[:, 0], points[:, 1]].mean() < 0.9
+
+
+# ---------------------------------------------------------------------------
+# select -- candidate ordering and suppression, at speed
+# ---------------------------------------------------------------------------
+
+def test_partitioning_the_candidates_matches_the_full_sort():
+    """The `keep` shortcut must be an optimisation, not an approximation."""
+    from pyidi.selection.select import _ordered_candidates
+
+    rng = np.random.default_rng(5)
+    for score in (rng.random((120, 160)), rng.integers(0, 4, (120, 160)).astype(float)):
+        eligible = score > np.percentile(score, 20)
+        full_rows, full_cols = _ordered_candidates(score, eligible)
+        for keep in (1, 9, 400, 5000):
+            rows, cols = _ordered_candidates(score, eligible, keep)
+            np.testing.assert_array_equal(rows[:keep], full_rows[:keep])
+            np.testing.assert_array_equal(cols[:keep], full_cols[:keep])
+
+
+def test_chunked_suppression_matches_a_plain_walk():
+    """Batching the occupancy test is exact because occupancy only ever grows."""
+    from pyidi.selection.select import _disc, _ordered_candidates, suppress
+
+    shape = (90, 130)
+    score = np.random.default_rng(6).random(shape)
+    rows, cols = _ordered_candidates(score, score > np.percentile(score, 30))
+
+    for radius in (0, 1, 4, 11):
+        for max_points in (None, 5, 10000):
+            taken = np.zeros(shape, dtype=bool)
+            expected = []
+            for row, col in zip(rows.tolist(), cols.tolist()):
+                if taken[row, col]:
+                    continue
+                expected.append((row, col))
+                if max_points is not None and len(expected) >= max_points:
+                    break
+                radius = int(radius)
+                if radius == 0:
+                    taken[row, col] = True
+                    continue
+                disc = _disc(radius)
+                r0, r1 = max(0, row - radius), min(shape[0], row + radius + 1)
+                c0, c1 = max(0, col - radius), min(shape[1], col + radius + 1)
+                taken[r0:r1, c0:c1] |= disc[r0 - row + radius:r1 - row + radius,
+                                            c0 - col + radius:c1 - col + radius]
+            assert suppress(rows, cols, shape, radius, max_points) == expected
+
+
+# ---------------------------------------------------------------------------
+# select -- decimation
+# ---------------------------------------------------------------------------
+
+def test_decimation_thins_the_points_without_moving_them(speckle):
+    """The distinction from a wider minimum distance, which re-selects instead."""
+    pipeline = SelectionPipeline(speckle, subset_size=11)
+    pipeline.add_entry('brush', np.ones(speckle.shape, dtype=bool))
+    pipeline.selector_params.update({'separation': 6, 'threshold': 0.05})
+
+    base = {tuple(point) for point in pipeline.points.tolist()}
+    assert len(base) > 20
+
+    for stride in (2, 3, 7):
+        pipeline.selector_params['decimation'] = stride
+        thinned = [tuple(point) for point in pipeline.points.tolist()]
+        assert set(thinned) <= base, stride
+        assert len(thinned) == pytest.approx(len(base) / stride, rel=0.15)
+
+
+def test_a_wider_separation_moves_the_points_instead(speckle):
+    """The contrast decimation exists for."""
+    pipeline = SelectionPipeline(speckle, subset_size=11)
+    pipeline.add_entry('brush', np.ones(speckle.shape, dtype=bool))
+    pipeline.selector_params.update({'separation': 6, 'threshold': 0.05})
+    base = {tuple(point) for point in pipeline.points.tolist()}
+
+    pipeline.selector_params['separation'] = 18
+    respaced = {tuple(point) for point in pipeline.points.tolist()}
+    assert not respaced <= base
+
+
+def test_decimation_leaves_hand_placed_points_alone():
+    """They were placed deliberately; thinning is for what the selector found."""
+    image, _ = flat_with_corners()
+    pipeline = SelectionPipeline(image, subset_size=11)
+    pipeline.add_entry('brush', np.ones(image.shape, dtype=bool))
+    pipeline.add_entry('points', [(100, 150), (100, 170), (100, 190)])
+    pipeline.selector_params['decimation'] = 5
+
+    points = {tuple(point) for point in pipeline.points.tolist()}
+    assert {(100, 150), (100, 170), (100, 190)} <= points
+
+
+def test_decimating_one_group_does_not_let_another_fill_the_gaps(speckle):
+    """What was selected is stamped before it is thinned, so gaps stay gaps."""
+    def right_hand_points(decimation):
+        pipeline = SelectionPipeline(speckle, subset_size=11)
+        left = pipeline.add_entry('polygon', rect(10, 10, 90, 58))
+        right = pipeline.add_entry('polygon', rect(10, 60, 90, 110))
+        # Different minimum distances, so the two are always separate groups:
+        # entries that share their settings are deliberately selected together.
+        left.selector_params = {'separation': 5, 'threshold': 0.05, 'decimation': decimation}
+        right.selector_params = {'separation': 6, 'threshold': 0.05}
+        return pipeline.points_and_credits()[1][1]
+
+    undecimated = right_hand_points(1)
+    assert len(undecimated) > 5
+    np.testing.assert_array_equal(right_hand_points(4), undecimated)
+
+
+# ---------------------------------------------------------------------------
+# One pass for points and per-entry credits
+# ---------------------------------------------------------------------------
+
+def test_points_and_credits_agree_with_asking_separately(speckle):
+    pipeline = SelectionPipeline(speckle, subset_size=11)
+    pipeline.add_entry('polygon', rect(10, 10, 90, 110))
+    pipeline.add_entry('points', [(50, 50)])
+
+    points, credited = pipeline.points_and_credits()
+    np.testing.assert_array_equal(points, pipeline.get_points())
+    for mine, theirs in zip(credited, pipeline.points_by_entry()):
+        np.testing.assert_array_equal(mine, theirs)
+
+
+# ---------------------------------------------------------------------------
+# Candidates -- what the mask is leaving out
+# ---------------------------------------------------------------------------
+
+def test_candidates_ignore_the_mask_entirely(speckle):
+    """They answer "what is there", which is the question a mask cannot."""
+    pipeline = SelectionPipeline(speckle, subset_size=11)
+    pipeline.add_entry('polygon', rect(5, 5, 25, 25))
+    candidates = pipeline.candidate_points()
+    assert len(candidates) > len(pipeline.points)
+    assert not pipeline.mask[candidates[:, 0], candidates[:, 1]].all()
+
+
+def test_candidates_survive_a_mask_edit(speckle):
+    """Cached across mask changes, so painting a region re-selects nothing."""
+    pipeline = SelectionPipeline(speckle, subset_size=11)
+    before = pipeline.candidate_points()
+    pipeline.add_entry('polygon', rect(5, 5, 25, 25))
+    assert pipeline.candidate_points() is before
+
+
+def test_candidates_are_recomputed_when_the_score_changes(speckle):
+    pipeline = SelectionPipeline(speckle, subset_size=11)
+    pipeline.define_score('score', 'shi_tomasi')
+    before = pipeline.candidate_points()
+    pipeline.define_score('score', 'gradient_direction', direction=(0, 1))
+    assert pipeline.candidate_points() is not before
+
+
+def test_candidates_are_recomputed_at_a_new_subset_size(speckle):
+    pipeline = SelectionPipeline(speckle, subset_size=11)
+    before = pipeline.candidate_points()
+    pipeline.set_subset_size(21)
+    assert pipeline.candidate_points() is not before
+
+
+def test_candidates_are_recomputed_when_a_selector_setting_changes(speckle):
+    pipeline = SelectionPipeline(speckle, subset_size=11)
+    before = pipeline.candidate_points()
+    pipeline.selector_params['separation'] = 3
+    after = pipeline.candidate_points()
+    assert after is not before
+    assert len(after) > len(before)
 
 
 # ---------------------------------------------------------------------------
@@ -846,15 +1166,15 @@ def test_output_is_accepted_by_a_method_class(image, tmp_path):
 def test_removing_a_point_leaves_no_replacement_beside_it(speckle):
     """Erasing the pixel alone is not enough.
 
-    Taking the best pixel of a neighbourhood away promotes the next one, and the
-    point comes back a pixel or two along -- which reads as the click having
-    nudged the point rather than removed it. What is erased is the whole disc
-    the point was reserving -- its minimum distance -- so nothing can land
-    nearer to it than a neighbouring point legitimately could have.
+    The reduction picks the best pixel of each block, so taking the winner away
+    promotes its neighbour and the point comes back one or two pixels along --
+    which reads as the click having nudged the point rather than removed it.
+    What is erased is the whole disc the point was reserving, so nothing can
+    land nearer to it than a neighbouring point legitimately could have.
     """
     pipeline = SelectionPipeline(speckle, subset_size=11)
     entry = pipeline.add_entry('polygon', rect(10, 10, 118, 118))
-    min_distance = pipeline.selector_params['min_distance']
+    separation = pipeline.selector_params['separation']
 
     target = tuple(int(v) for v in pipeline.points[0])
     pipeline.remove_point(entry, target)
@@ -862,11 +1182,16 @@ def test_removing_a_point_leaves_no_replacement_beside_it(speckle):
     survivors = pipeline.points
     assert not any(tuple(p) == target for p in survivors)
     gaps = np.hypot(survivors[:, 0] - target[0], survivors[:, 1] - target[1])
-    assert gaps.min() >= min_distance
+    assert gaps.min() >= separation
 
 
 def test_removing_a_point_works_more_than_once(speckle):
-    """Every click, not just the one that first allocates the erasure."""
+    """The regression: the second click and every one after it did nothing.
+
+    ``erased`` was grown with an in-place write, and the rasterisation cache
+    identifies that array by object -- so after the first click, which allocates
+    it, no later one changed anything the cache could see.
+    """
     pipeline = SelectionPipeline(speckle, subset_size=11)
     entry = pipeline.add_entry('polygon', rect(10, 10, 118, 118))
 
@@ -971,8 +1296,15 @@ def test_a_hand_picked_point_off_the_frame_is_dropped(speckle):
 def test_an_off_frame_point_is_dropped_from_its_row_too(speckle):
     """Not just from the total, or the list would disagree with the canvas."""
     pipeline = SelectionPipeline(speckle, subset_size=11)
-    pipeline.add_entry('points', [(-5, 40), (40, 40)])
-    assert [tuple(p) for p in pipeline.points_by_entry()[0]] == [(40, 40)]
+    entry = pipeline.add_entry('points', [(-5, 40), (40, 40)])
+    credited = pipeline.points_by_entry()[pipeline.entries.index(entry)]
+    assert [tuple(p) for p in credited] == [(40, 40)]
+
+
+def test_merging_survives_a_coordinate_off_the_top_of_the_frame():
+    """The dedup folds a pair into one integer; the fold has to stay one-to-one."""
+    merged = merge_points([(-5, 3), (-5, 3), (2, 7)], [(2, 7), (9, 1)])
+    assert [tuple(p) for p in merged] == [(-5, 3), (2, 7), (9, 1)]
 
 
 # ---------------------------------------------------------------------------
@@ -1013,3 +1345,44 @@ def test_a_repeated_request_is_still_free(speckle):
     first = store.get('score')
     assert store.get('score') is first
     assert store.n_evaluations == 1
+
+
+# ---------------------------------------------------------------------------
+# The point cap, when something is already taken
+# ---------------------------------------------------------------------------
+
+def test_the_cap_is_filled_even_though_some_candidates_are_taken(speckle):
+    """At a separation of 1 the candidates are only sorted as far as the cap.
+
+    That is exact when every one of them is accepted, and it was not: the
+    occupied positions were dropped *after* the cut, so a run with hand-picked
+    points returned fewer points than the cap allowed while more were eligible.
+    """
+    score = evaluate(speckle, 'shi_tomasi', 11)
+    mask = np.zeros(score.shape, dtype=bool)
+    mask[20:110, 20:110] = True
+
+    free = select_peaks(score, mask, separation=1, threshold=0, max_points=50)
+    taken = occupancy(free[:10], score.shape, 0)
+    blocked = select_peaks(score, mask, separation=1, threshold=0, max_points=50,
+                           occupied=taken)
+
+    assert len(blocked) == 50
+    assert not set(blocked) & set(free[:10])
+
+
+# ---------------------------------------------------------------------------
+# The rasterisation cache is keyed by identity
+# ---------------------------------------------------------------------------
+
+def test_the_raster_cache_holds_the_entry_it_describes(speckle):
+    """An ``id`` is unique only among live objects.
+
+    Without a reference here, a deleted entry could be collected and a new one
+    allocated at the same address, which would then read the dead entry's area
+    out of the cache.
+    """
+    pipeline = SelectionPipeline(speckle, subset_size=11)
+    entry = pipeline.add_entry('polygon', rect(10, 10, 50, 50))
+    pipeline.area(entry)
+    assert any(held is entry for held, _, _ in pipeline._raster_cache.values())

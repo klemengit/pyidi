@@ -15,6 +15,9 @@ interface and the pipeline*: that a threshold or mask edit re-derives points
 from a cached score while a subset-size change pays for a recomputation, that
 roles and visibility do what the rows say they do, and that undo puts things
 back. Those are the properties the whole design rests on.
+
+Note that a window opens with one seeded ``Whole image`` mask row, so the
+helpers below clear it when a test wants to reason about a region of its own.
 """
 import os
 
@@ -32,7 +35,8 @@ from PyQt6 import QtCore, QtWidgets  # noqa: E402
 sys.ps1 = getattr(sys, "ps1", ">>> ")
 QtWidgets.QApplication.exec = lambda self=None: 0
 
-from pyidi.GUIs.feature_selection import FeatureSelectionGUI  # noqa: E402
+from pyidi.GUIs.feature_selection import (  # noqa: E402
+    REDRAW_BUDGET_MS, STEP_FIND, STEP_HINTS, STEP_MASK, FeatureSelectionGUI)
 
 
 def make_image():
@@ -42,8 +46,18 @@ def make_image():
 
 
 def make_gui(**kwargs):
-    """A headless window on a fresh synthetic frame."""
+    """A headless window on a fresh synthetic frame, as the user gets it."""
     return FeatureSelectionGUI(make_image(), **kwargs)
+
+
+def empty_gui(**kwargs):
+    """A window with the seeded whole-image row removed, so nothing is masked."""
+    gui = make_gui(**kwargs)
+    gui.pipeline.entries = []
+    gui.active_index = None
+    gui.undo_stack = []
+    gui.refresh()
+    return gui
 
 
 def rect(r0, c0, r1, c1):
@@ -52,9 +66,10 @@ def rect(r0, c0, r1, c1):
 
 
 def gui_with_region(**kwargs):
-    """A window with one polygon mask covering most of the frame."""
-    gui = make_gui(**kwargs)
+    """A window whose only mask is one polygon covering most of the frame."""
+    gui = empty_gui(**kwargs)
     gui.pipeline.add_entry('polygon', rect(20, 20, 140, 220))
+    gui.active_index = 0
     gui.refresh()
     return gui
 
@@ -109,10 +124,10 @@ def test_the_image_is_not_transposed():
 # Steps
 # ---------------------------------------------------------------------------
 
-def test_the_three_steps_are_separately_reachable():
+def test_both_tabs_are_separately_reachable():
     gui = make_gui()
     try:
-        for name in ('Mask', 'Evaluate', 'Select'):
+        for name in (STEP_FIND, STEP_MASK):
             gui.select_step(name)
             assert gui.step == name
             assert gui.step_stack.currentWidget() is gui.step_pages[name]
@@ -120,23 +135,123 @@ def test_the_three_steps_are_separately_reachable():
         gui.close()
 
 
-def test_the_highlight_is_a_mask_step_cue():
+def test_the_window_opens_on_evaluate_and_select():
+    """Evaluate and select do not depend on the mask, so they come first."""
+    gui = make_gui()
+    try:
+        assert gui.step == STEP_FIND
+        assert list(gui.step_pages) == [STEP_FIND, STEP_MASK]
+    finally:
+        gui.close()
+
+
+def test_the_tabs_are_not_numbered():
+    """Numbering would imply an order the pipeline does not have."""
+    gui = make_gui()
+    try:
+        for name, button in gui.step_buttons.items():
+            assert button.text() == name
+    finally:
+        gui.close()
+
+
+def test_evaluate_and_select_share_one_panel():
+    gui = make_gui()
+    try:
+        page = gui.step_pages[STEP_FIND]
+        titles = {box.title() for box in page.findChildren(QtWidgets.QGroupBox)}
+        assert {'Evaluate', 'Select'} <= titles
+    finally:
+        gui.close()
+
+
+def test_the_highlight_is_a_mask_tab_cue():
     gui = gui_with_region()
     try:
-        gui.select_step('Mask')
+        gui.select_step(STEP_MASK)
         assert gui.highlight_scatter.isVisible()
-        gui.select_step('Select')
+        gui.select_step(STEP_FIND)
         assert not gui.highlight_scatter.isVisible()
     finally:
         gui.close()
 
 
 def test_selecting_without_a_mask_says_so_rather_than_failing():
-    gui = make_gui()
+    gui = empty_gui()
     try:
-        gui.select_step('Select')
+        gui.select_step(STEP_FIND)
         assert 'mask' in gui.select_note.text().lower()
         assert gui.get_points().shape == (0, 2)
+    finally:
+        gui.close()
+
+
+# ---------------------------------------------------------------------------
+# The seeded whole-image row
+# ---------------------------------------------------------------------------
+
+def test_the_window_opens_with_candidates_over_the_whole_frame():
+    """There has to be something to trim before trimming is a workflow."""
+    gui = make_gui()
+    try:
+        assert len(gui.pipeline.entries) == 1
+        assert gui.pipeline.entries[0].label == 'Whole image'
+        assert gui.pipeline.entries[0].role == 'mask'
+        assert gui.pipeline.mask.all()
+        assert len(gui.get_points()) > 0
+    finally:
+        gui.close()
+
+
+def test_the_seeded_row_costs_one_evaluation_and_no_more():
+    gui = make_gui()
+    try:
+        assert gui.pipeline.store.n_evaluations == 1
+        gui.get_points()
+        assert gui.pipeline.store.n_evaluations == 1
+    finally:
+        gui.close()
+
+
+def test_the_seeded_row_is_an_ordinary_row():
+    gui = make_gui()
+    try:
+        gui.entry_list.item(0).setCheckState(QtCore.Qt.CheckState.Unchecked)
+        assert gui.get_points().shape == (0, 2)
+        gui.entry_list.item(0).setCheckState(QtCore.Qt.CheckState.Checked)
+        assert len(gui.get_points()) > 0
+
+        gui.active_index = 0
+        gui.delete_active()
+        assert gui.pipeline.entries == []
+        assert gui.get_points().shape == (0, 2)
+    finally:
+        gui.close()
+
+
+def test_the_seeded_row_can_be_trimmed_with_the_deselect_brush():
+    gui = make_gui()
+    try:
+        before = gui.pipeline.mask.sum()
+        gui.select_step(STEP_MASK)
+        gui.select_tool('brush')
+        gui.deselect_button.setChecked(True)
+        gui.brush_start()
+        gui.brush_move((80, 120))
+        gui.brush_end()
+        assert 0 < gui.pipeline.mask.sum() < before
+    finally:
+        gui.close()
+
+
+def test_drawing_a_region_adds_to_the_seeded_one():
+    """The combined mask is a union, so a new region does not replace it."""
+    gui = make_gui()
+    try:
+        gui.pipeline.add_entry('polygon', rect(20, 20, 60, 60))
+        gui.refresh()
+        assert len(gui.pipeline.entries) == 2
+        assert gui.pipeline.mask.all()
     finally:
         gui.close()
 
@@ -158,12 +273,12 @@ def test_a_threshold_change_does_not_re_evaluate():
         gui.close()
 
 
-def test_a_minimum_distance_change_does_not_re_evaluate():
+def test_a_separation_change_does_not_re_evaluate():
     gui = gui_with_region()
     try:
         evaluations = gui.pipeline.store.n_evaluations
         before = len(gui.get_points())
-        gui.min_distance_spin.setValue(30)
+        gui.separation_spin.setValue(30)
         assert gui.pipeline.store.n_evaluations == evaluations
         assert len(gui.get_points()) < before
     finally:
@@ -277,12 +392,39 @@ def test_deleting_a_row_removes_it():
         gui.close()
 
 
-def test_clear_all_empties_the_list():
+def test_clear_all_goes_back_to_the_whole_frame():
+    """Starting over means the state the window opens in, not a blank frame."""
     gui = gui_with_region()
     try:
         gui.pipeline.add_entry('points', [(50, 50)])
         gui.refresh()
         gui.clear_all()
+
+        assert [entry.label for entry in gui.pipeline.entries] == ['Whole image']
+        assert gui.pipeline.mask.all()
+        assert len(gui.get_points())
+    finally:
+        gui.close()
+
+
+def test_clear_all_is_undoable():
+    gui = gui_with_region()
+    try:
+        before = gui.get_points()
+        gui.clear_all()
+        gui.undo()
+        assert [entry.label for entry in gui.pipeline.entries] == ['Polygon 1']
+        np.testing.assert_array_equal(gui.get_points(), before)
+    finally:
+        gui.close()
+
+
+def test_deleting_the_whole_image_row_still_selects_nothing():
+    """A different act from clearing: "not this area", not "forget what I did"."""
+    gui = make_gui()
+    try:
+        gui.active_index = 0
+        gui.delete_active()
         assert gui.pipeline.entries == []
         assert gui.get_points().shape == (0, 2)
     finally:
@@ -311,7 +453,7 @@ def test_undo_restores_a_deleted_row_at_its_original_position():
 
 
 def test_undo_reverses_a_vertex_add():
-    gui = make_gui()
+    gui = empty_gui()
     try:
         gui.select_tool('polygon')
         for position in [(20, 20), (20, 100), (100, 100)]:
@@ -325,7 +467,7 @@ def test_undo_reverses_a_vertex_add():
 
 
 def test_undo_reverses_a_brush_stroke():
-    gui = make_gui()
+    gui = empty_gui()
     try:
         gui.select_tool('brush')
         gui.brush_start()
@@ -339,7 +481,7 @@ def test_undo_reverses_a_brush_stroke():
 
 
 def test_undo_reverses_a_deselection():
-    gui = make_gui()
+    gui = empty_gui()
     try:
         gui.select_tool('brush')
         gui.brush_start()
@@ -375,7 +517,7 @@ def test_the_subset_border_pen_is_cosmetic():
 
 
 def test_the_subset_overlay_covers_the_expected_area():
-    gui = make_gui(subset_size=(21, 7))
+    gui = empty_gui(subset_size=(21, 7))
     try:
         gui.pipeline.add_entry('points', [(80, 120)])
         gui.refresh()
@@ -408,6 +550,28 @@ def test_the_score_overlay_is_transparent_on_the_invalid_border():
         rgba = gui.score_overlay.image
         assert (rgba[:5, :, 3] == 0).all()
         assert (rgba[80, 100:140, 3] > 0).all()
+    finally:
+        gui.close()
+
+
+def test_the_score_overlay_sits_beside_the_selection_controls():
+    """Seeing the score while thresholding is how you tell "too tight" from "nothing there"."""
+    gui = gui_with_region()
+    try:
+        page = gui.step_pages[STEP_FIND]
+        assert gui.show_score in page.findChildren(QtWidgets.QCheckBox)
+        assert gui.threshold_slider in page.findChildren(QtWidgets.QSlider)
+    finally:
+        gui.close()
+
+
+def test_toggling_the_overlay_leaves_the_selection_alone():
+    gui = gui_with_region()
+    try:
+        before = gui.get_points()
+        gui.show_score.setChecked(True)
+        gui.show_score.setChecked(False)
+        np.testing.assert_array_equal(gui.get_points(), before)
     finally:
         gui.close()
 
@@ -482,6 +646,7 @@ def test_the_count_label_follows_the_points():
     try:
         assert gui.count_label.text() == f'{len(gui.get_points())} points'
         gui.threshold_slider.setValue(995)
+        gui.flush_refresh()
         assert gui.count_label.text() == f'{len(gui.get_points())} points'
     finally:
         gui.close()
@@ -511,12 +676,712 @@ def test_both_interfaces_are_importable():
 
 
 # ---------------------------------------------------------------------------
+# Where the controls live
+# ---------------------------------------------------------------------------
+
+def test_the_subset_size_shows_on_every_tab():
+    """It drives the score and it measures the drawn rectangles, so it is neither tab's."""
+    gui = make_gui()
+    try:
+        for name in (STEP_FIND, STEP_MASK):
+            gui.select_step(name)
+            assert gui.height_spin.isVisible()
+            assert gui.width_spin.isVisible()
+        # ... by living outside the pages rather than being duplicated on each.
+        for page in gui.step_pages.values():
+            assert gui.height_spin not in page.findChildren(QtWidgets.QSpinBox)
+    finally:
+        gui.close()
+
+
+def test_the_point_spacing_stays_with_the_mask():
+    """It only affects rows that lay points out, which is a masking concern."""
+    gui = make_gui()
+    try:
+        assert gui.spacing_spin in gui.step_pages[STEP_MASK].findChildren(QtWidgets.QSpinBox)
+    finally:
+        gui.close()
+
+
+def test_both_tabs_offer_the_score_overlay():
+    gui = make_gui()
+    try:
+        assert gui.show_score in gui.step_pages[STEP_FIND].findChildren(QtWidgets.QCheckBox)
+        assert gui.show_score_mask in gui.step_pages[STEP_MASK].findChildren(QtWidgets.QCheckBox)
+    finally:
+        gui.close()
+
+
+def test_the_score_toggles_are_ganged():
+    """One overlay, two checkboxes: they must not disagree about its state."""
+    gui = gui_with_region()
+    try:
+        gui.show_score_mask.setChecked(True)
+        assert gui.show_score.isChecked()
+        assert gui.score_overlay.isVisible()
+
+        gui.show_score.setChecked(False)
+        assert not gui.show_score_mask.isChecked()
+        assert not gui.score_overlay.isVisible()
+    finally:
+        gui.close()
+
+
+# ---------------------------------------------------------------------------
+# Gradient direction
+# ---------------------------------------------------------------------------
+
+def use_gradient(gui):
+    """Switch the evaluator to the direction-taking one."""
+    gui.evaluator_combo.setCurrentIndex(gui.evaluator_combo.findData('gradient_direction'))
+    return gui
+
+
+def test_the_direction_can_be_dragged_out_on_the_image():
+    gui = use_gradient(make_gui())
+    try:
+        gui.direction_button.setChecked(True)
+        assert gui.drawing_direction
+
+        gui.set_direction_from_drag((10.0, 10.0), (10.0, 40.0))    # straight along +col
+
+        row, col = (spin.value() for spin in gui.direction_spins)
+        assert row == pytest.approx(0.0, abs=1e-6)
+        assert col == pytest.approx(1.0, abs=1e-6)
+        assert not gui.drawing_direction        # one drag sets it once
+    finally:
+        gui.close()
+
+
+def test_the_dragged_direction_reaches_the_evaluator():
+    gui = use_gradient(make_gui())
+    try:
+        gui.set_direction_from_drag((0.0, 0.0), (30.0, 0.0))       # straight along +row
+        spec = gui.pipeline.store.spec(gui.pipeline.default_score)
+        assert spec.evaluator == 'gradient_direction'
+        assert dict(spec.parameters)['direction'] == pytest.approx((1.0, 0.0))
+    finally:
+        gui.close()
+
+
+def test_the_direction_line_shows_where_it_was_dragged():
+    gui = use_gradient(make_gui())
+    try:
+        gui.set_direction_from_drag((20.0, 30.0), (60.0, 90.0))
+        xs, ys = gui.direction_line.getData()
+        np.testing.assert_allclose(xs, [30.0, 90.0])               # x is the column
+        np.testing.assert_allclose(ys, [20.0, 60.0])
+    finally:
+        gui.close()
+
+
+def test_a_preset_costs_one_evaluation_not_two():
+    """Writing two components must not evaluate once per component."""
+    gui = use_gradient(make_gui())
+    try:
+        before = gui.pipeline.store.n_evaluations
+        gui.set_direction(1.0, 1.0)
+        assert gui.pipeline.store.n_evaluations == before + 1
+        row, col = (spin.value() for spin in gui.direction_spins)
+        assert (row, col) == pytest.approx((2 ** -0.5, 2 ** -0.5), abs=1e-3)
+    finally:
+        gui.close()
+
+
+def test_a_zero_direction_is_ignored():
+    gui = use_gradient(make_gui())
+    try:
+        before = [spin.value() for spin in gui.direction_spins]
+        gui.set_direction(0.0, 0.0)
+        assert [spin.value() for spin in gui.direction_spins] == before
+    finally:
+        gui.close()
+
+
+def test_leaving_the_gradient_evaluator_drops_its_direction_line():
+    gui = use_gradient(make_gui())
+    try:
+        gui.set_direction_from_drag((0.0, 0.0), (0.0, 30.0))
+        assert gui.direction_line.getData()[0] is not None
+
+        gui.evaluator_combo.setCurrentIndex(gui.evaluator_combo.findData('shi_tomasi'))
+        assert gui.direction_line.getData()[0] is None
+        assert gui.direction_spins == []
+        assert not gui.drawing_direction
+    finally:
+        gui.close()
+
+
+# ---------------------------------------------------------------------------
+# Masking is visible in the points
+# ---------------------------------------------------------------------------
+
+def test_drawing_a_region_stands_the_whole_image_row_down():
+    """Masks are a union, so a drawn region would otherwise change nothing."""
+    gui = make_gui()
+    try:
+        seeded = gui.pipeline.entries[0]
+        assert seeded.label == 'Whole image' and seeded.visible
+
+        gui.pipeline.add_entry('polygon', rect(20, 20, 60, 60))
+        gui._retire_whole_image()
+        gui.refresh()
+
+        assert not seeded.visible
+        assert gui.pipeline.mask[40, 40]
+        assert not gui.pipeline.mask[120, 200]      # outside the drawn region
+    finally:
+        gui.close()
+
+
+def test_standing_the_whole_image_row_down_is_undoable():
+    gui = make_gui()
+    try:
+        seeded = gui.pipeline.entries[0]
+        gui.pipeline.add_entry('polygon', rect(20, 20, 60, 60))
+        gui._retire_whole_image()
+        gui.undo()
+        assert seeded.visible
+    finally:
+        gui.close()
+
+
+def test_an_empty_polygon_leaves_the_whole_image_row_alone():
+    """Two vertices enclose nothing, so there is no region to make way for yet."""
+    gui = make_gui()
+    try:
+        gui.pipeline.add_entry('polygon', [(20.0, 20.0), (20.0, 60.0)])
+        gui._retire_whole_image()
+        assert gui.pipeline.entries[0].visible
+    finally:
+        gui.close()
+
+
+def test_a_points_row_leaves_the_whole_image_row_alone():
+    """A literal point adds to the selection rather than restricting it."""
+    gui = make_gui()
+    try:
+        gui.pipeline.add_entry('points', [(80, 120)])
+        gui._retire_whole_image()
+        assert gui.pipeline.entries[0].visible
+    finally:
+        gui.close()
+
+
+def crossed_out(gui):
+    """How many points the deselect brush is currently showing as doomed."""
+    xs = gui.doomed_scatter.getData()[0]
+    return 0 if xs is None else len(xs)
+
+
+def test_a_deselect_stroke_crosses_out_the_points_it_covers():
+    """Feedback while the stroke is being painted, not only when the mouse comes up."""
+    gui = gui_with_region()
+    try:
+        gui.select_step(STEP_MASK)
+        gui.select_tool('brush')
+        gui.deselect_button.setChecked(True)
+
+        gui.brush_start()
+        gui.brush_radius.setValue(40)
+        gui.brush_move((80.0, 120.0))
+
+        doomed = crossed_out(gui)
+        assert doomed > 0
+        assert len(gui.point_scatter.getData()[0]) == len(gui.get_points()) - doomed
+    finally:
+        gui.close()
+
+
+def test_the_crossed_out_points_are_gone_once_the_stroke_lands():
+    gui = gui_with_region()
+    try:
+        gui.select_step(STEP_MASK)
+        gui.select_tool('brush')
+        gui.deselect_button.setChecked(True)
+        before = len(gui.get_points())
+
+        gui.brush_start()
+        gui.brush_radius.setValue(40)
+        gui.brush_move((80.0, 120.0))
+        stroke = gui._paint.copy()
+        gui.brush_end()
+
+        after = gui.get_points()
+        assert len(after) < before
+        # The count is not simply `before - doomed`: freeing the area lets the
+        # minimum-distance rule admit points it had previously suppressed.
+        assert not stroke[after[:, 0], after[:, 1]].any()
+        assert crossed_out(gui) == 0
+    finally:
+        gui.close()
+
+
+def test_a_selecting_stroke_crosses_nothing_out():
+    """Painting a new region takes nothing away, so nothing should look doomed."""
+    gui = gui_with_region()
+    try:
+        gui.select_step(STEP_MASK)
+        gui.select_tool('brush')
+        gui.brush_start()
+        gui.brush_radius.setValue(40)
+        gui.brush_move((80.0, 120.0))
+        assert crossed_out(gui) == 0
+    finally:
+        gui.close()
+
+
+# ---------------------------------------------------------------------------
+# Panel layout
+# ---------------------------------------------------------------------------
+
+def test_no_group_box_contains_another():
+    """Two nested frames cost two sets of margins out of an already narrow panel."""
+    gui = make_gui()
+    try:
+        for page in gui.step_pages.values():
+            for box in page.findChildren(QtWidgets.QGroupBox):
+                assert not box.findChildren(QtWidgets.QGroupBox), box.title()
+    finally:
+        gui.close()
+
+
+def test_only_the_current_selectors_settings_are_shown():
+    """A greyed-out row is a line of panel spent saying the line does not apply."""
+    gui = make_gui()
+    try:
+        assert gui.separation_spin.isVisible()
+        assert not gui.pitch_spin.isVisible()
+
+        gui.selector_combo.setCurrentIndex(gui.selector_combo.findData('lattice'))
+        assert gui.pitch_spin.isVisible()
+        assert not gui.separation_spin.isVisible()
+    finally:
+        gui.close()
+
+
+def test_the_evaluator_describes_itself_in_a_tooltip():
+    """It used to be a paragraph on the panel, which you read once."""
+    gui = make_gui()
+    try:
+        assert 'corner' in gui.evaluator_combo.toolTip().lower()
+        gui.evaluator_combo.setCurrentIndex(gui.evaluator_combo.findData('gradient_direction'))
+        assert 'direction' in gui.evaluator_combo.toolTip().lower()
+    finally:
+        gui.close()
+
+
+# ---------------------------------------------------------------------------
+# Quality threshold and decimation
+# ---------------------------------------------------------------------------
+
+def test_the_threshold_defaults_to_quality():
+    """Percentile spends most of its travel inside the featureless background."""
+    gui = make_gui()
+    try:
+        assert gui.threshold_mode.currentData() == 'quality'
+        assert gui.pipeline.selector_params['threshold_mode'] == 'quality'
+        assert gui.pipeline.selector_params['threshold'] == pytest.approx(0.01, rel=0.02)
+    finally:
+        gui.close()
+
+
+def test_the_quality_slider_is_logarithmic():
+    """The useful settings span three decades, so a linear slider wastes most of itself."""
+    gui = make_gui()
+    try:
+        seen = []
+        for position in (0, 250, 500, 750, 1000):
+            gui.threshold_slider.setValue(position)
+            seen.append(gui.pipeline.selector_params['threshold'])
+        assert seen[0] == pytest.approx(0.001)
+        assert seen[-1] == pytest.approx(1.0)
+        ratios = [b / a for a, b in zip(seen, seen[1:])]
+        assert all(r == pytest.approx(ratios[0], rel=1e-6) for r in ratios)
+    finally:
+        gui.close()
+
+
+def test_switching_the_rule_moves_the_slider_to_that_rules_default():
+    """The same position means 90 under one rule and 0.5 under another."""
+    gui = make_gui()
+    try:
+        gui.threshold_mode.setCurrentIndex(gui.threshold_mode.findData('percentile'))
+        assert gui.pipeline.selector_params['threshold'] == pytest.approx(90.0)
+
+        gui.threshold_mode.setCurrentIndex(gui.threshold_mode.findData('quality'))
+        assert gui.pipeline.selector_params['threshold'] == pytest.approx(0.01, rel=0.02)
+    finally:
+        gui.close()
+
+
+def test_quality_keeps_the_points_off_the_blank_background():
+    """The reason the default changed, end to end."""
+    frame = np.full((200, 300), 240, dtype=np.uint8)
+    corners = np.zeros(frame.shape, dtype=bool)
+    for row in range(40, 180, 60):
+        for col in range(40, 280, 60):
+            frame[row:row + 20, col:col + 20] = 20
+            corners[row - 9:row + 29, col - 9:col + 29] = True
+    frame = np.clip(frame.astype(int) + np.random.default_rng(3).integers(-5, 6, frame.shape),
+                    0, 255).astype(np.uint8)
+
+    gui = FeatureSelectionGUI(frame, subset_size=11)
+    try:
+        for position in (1000, 750, 500, 333):
+            gui.threshold_slider.setValue(position)
+            points = gui.get_points()
+            assert len(points)
+            assert corners[points[:, 0], points[:, 1]].all(), gui.threshold_label.text()
+    finally:
+        gui.close()
+
+
+def test_decimation_thins_without_moving_the_survivors():
+    gui = gui_with_region()
+    try:
+        gui.separation_spin.setValue(6)
+        before = {tuple(point) for point in gui.get_points().tolist()}
+        assert len(before) > 20
+
+        gui.decimation_spin.setValue(3)
+        after = [tuple(point) for point in gui.get_points().tolist()]
+        assert set(after) <= before
+        assert len(after) == pytest.approx(len(before) / 3, rel=0.2)
+    finally:
+        gui.close()
+
+
+def test_decimation_does_not_re_evaluate():
+    gui = gui_with_region()
+    try:
+        before = gui.pipeline.store.n_evaluations
+        gui.decimation_spin.setValue(4)
+        assert gui.pipeline.store.n_evaluations == before
+    finally:
+        gui.close()
+
+
+def test_a_redraw_runs_the_pipeline_once():
+    """It used to run three times: the total, the row counts and the highlight."""
+    gui = gui_with_region()
+    try:
+        calls = []
+        original = gui.pipeline.picked_points
+        gui.pipeline.picked_points = lambda *a, **k: (calls.append(1), original(*a, **k))[1]
+        gui.select_step(STEP_MASK)         # the highlight is drawn on this tab
+        calls.clear()
+        gui.refresh()
+        assert len(calls) == 1
+    finally:
+        gui.close()
+
+
+# ---------------------------------------------------------------------------
+# Coalescing the redraws a dragged control produces
+# ---------------------------------------------------------------------------
+
+def test_a_cheap_redraw_happens_immediately():
+    """A live slider is the whole point; deferring a redraw we can afford buys nothing."""
+    gui = gui_with_region()
+    try:
+        gui._last_refresh_ms = 0.0
+        gui.threshold_slider.setValue(700)
+        assert not gui._refresh_timer.isActive()
+        assert len(gui._points) == len(gui.get_points())
+    finally:
+        gui.close()
+
+
+def test_an_expensive_redraw_is_deferred_and_coalesced():
+    """Twenty positions on the way past cost one redraw, not twenty."""
+    gui = gui_with_region()
+    try:
+        gui._last_refresh_ms = REDRAW_BUDGET_MS + 1.0
+        stale = gui._points
+        for position in range(700, 720):
+            gui.threshold_slider.setValue(position)
+        assert gui._refresh_timer.isActive()
+        np.testing.assert_array_equal(gui._points, stale)     # nothing redrawn yet
+
+        gui.flush_refresh()
+        assert not gui._refresh_timer.isActive()
+        np.testing.assert_array_equal(gui._points, gui.get_points())
+    finally:
+        gui.close()
+
+
+def test_the_deferred_redraw_lands_on_the_value_the_control_stopped_at():
+    gui = gui_with_region()
+    try:
+        gui._last_refresh_ms = REDRAW_BUDGET_MS + 1.0
+        gui.threshold_slider.setValue(400)
+        gui.threshold_slider.setValue(900)
+        gui.flush_refresh()
+        assert len(gui._points) == len(gui.get_points())
+    finally:
+        gui.close()
+
+
+# ---------------------------------------------------------------------------
+# One density control, and it is not a stride
+# ---------------------------------------------------------------------------
+
+def test_the_separation_is_the_density_control():
+    gui = gui_with_region()
+    try:
+        gui.separation_spin.setValue(6)
+        loose = gui.get_points()
+        gui.separation_spin.setValue(18)
+        tight = gui.get_points()
+        assert len(tight) < len(loose)
+        for points, separation in ((loose, 6), (tight, 18)):
+            gaps = np.hypot(points[:, None, 0] - points[None, :, 0],
+                            points[:, None, 1] - points[None, :, 1])
+            np.fill_diagonal(gaps, np.inf)
+            assert gaps.min() >= separation
+    finally:
+        gui.close()
+
+
+def test_the_separation_cannot_be_turned_off():
+    """Zero was the setting that made the point cap look like a tight cluster."""
+    gui = make_gui()
+    try:
+        assert gui.separation_spin.minimum() == 1
+    finally:
+        gui.close()
+
+
+def test_the_threshold_menu_offers_quality_and_percentile_only():
+    gui = make_gui()
+    try:
+        rules = [gui.threshold_mode.itemData(i) for i in range(gui.threshold_mode.count())]
+        assert rules == ['quality', 'percentile']
+    finally:
+        gui.close()
+
+
+def test_the_cap_says_so_rather_than_looking_like_a_threshold():
+    gui = gui_with_region()
+    try:
+        gui.max_points_spin.setValue(20)
+        gui.separation_spin.setValue(2)
+        gui.flush_refresh()
+        assert '20' in gui.select_note.text()
+        assert 'cap' in gui.select_note.text().lower()
+
+        gui.separation_spin.setValue(40)
+        gui.flush_refresh()
+        assert gui.select_note.text() == ''
+    finally:
+        gui.close()
+
+
+# ---------------------------------------------------------------------------
+# What the mask is leaving out
+# ---------------------------------------------------------------------------
+
+def greyed(gui):
+    """The dimmed candidate positions currently drawn, as ``(row, col)``."""
+    x, y = gui.candidate_scatter.getData()
+    if x is None or not len(x):
+        return np.zeros((0, 2), dtype=int)
+    return np.column_stack([y - 0.5, x - 0.5]).astype(int)
+
+
+def test_the_mask_tab_shows_the_features_the_mask_leaves_out():
+    """"No point here" is otherwise two different things wearing one face."""
+    gui = empty_gui()
+    try:
+        gui.pipeline.add_entry('polygon', rect(20, 20, 60, 60))
+        gui.active_index = 0
+        gui.select_step(STEP_MASK)
+        outside = greyed(gui)
+        assert len(outside)
+        mask = gui.pipeline.mask
+        assert not mask[outside[:, 0], outside[:, 1]].any()
+    finally:
+        gui.close()
+
+
+def test_masking_an_area_takes_its_points_out_of_the_dimmed_set():
+    gui = empty_gui()
+    try:
+        gui.select_step(STEP_MASK)
+        before = len(greyed(gui))
+        gui.pipeline.add_entry('polygon', rect(20, 20, 140, 220))
+        gui.refresh()
+        assert len(greyed(gui)) < before
+    finally:
+        gui.close()
+
+
+def test_the_dimmed_candidates_are_a_mask_tab_cue():
+    """On the other tab everything drawn is selected, so a second tier would only confuse."""
+    gui = empty_gui()
+    try:
+        gui.select_step(STEP_MASK)
+        assert len(greyed(gui))
+        gui.select_step(STEP_FIND)
+        assert not len(greyed(gui))
+    finally:
+        gui.close()
+
+
+def test_editing_a_mask_does_not_move_the_candidates():
+    """They are the whole-frame selection, so painting turns points red where it lands."""
+    gui = empty_gui()
+    try:
+        gui.select_step(STEP_MASK)
+        before = gui.pipeline.candidate_points()
+        gui.pipeline.add_entry('polygon', rect(20, 20, 140, 220))
+        gui.refresh()
+        assert gui.pipeline.candidate_points() is before
+    finally:
+        gui.close()
+
+
+def test_a_new_threshold_does_move_the_candidates():
+    gui = empty_gui()
+    try:
+        gui.select_step(STEP_MASK)
+        before = len(gui.pipeline.candidate_points())
+        gui.threshold_slider.setValue(gui.threshold_slider.maximum())
+        gui.flush_refresh()
+        assert len(gui.pipeline.candidate_points()) < before
+    finally:
+        gui.close()
+
+
+# ---------------------------------------------------------------------------
+# Tab names and where the panel's boxes live
+# ---------------------------------------------------------------------------
+
+def test_the_tabs_are_named_for_the_pipeline_steps():
+    """Not "find points": the steps have names, and the tabs hold exactly those."""
+    assert STEP_MASK.lower() == 'mask'
+    assert 'evaluate' in STEP_FIND.lower() and 'select' in STEP_FIND.lower()
+    # An '&' would be read as a mnemonic and swallowed out of the button label.
+    assert '&' not in STEP_FIND
+
+
+def test_the_selections_list_is_a_mask_tab_control():
+    """Every row in it, and every button under it, acts on something drawn there."""
+    gui = make_gui()
+    try:
+        gui.select_step(STEP_MASK)
+        assert gui.selection_box.isVisible()
+        gui.select_step(STEP_FIND)
+        assert not gui.selection_box.isVisible()
+    finally:
+        gui.close()
+
+
+def test_the_subset_group_stays_on_both_tabs():
+    """The counterpart to the list moving: this one really is read by both steps."""
+    gui = make_gui()
+    try:
+        for name in (STEP_FIND, STEP_MASK):
+            gui.select_step(name)
+            assert gui.height_spin.isVisible()
+    finally:
+        gui.close()
+
+
+# ---------------------------------------------------------------------------
+# Tooltips
+# ---------------------------------------------------------------------------
+
+def test_every_setting_explains_itself():
+    gui = make_gui()
+    try:
+        for widget in (gui.selector_combo, gui.threshold_mode, gui.threshold_slider,
+                       gui.separation_spin, gui.pitch_spin, gui.max_points_spin,
+                       gui.decimation_spin, gui.spacing_spin, gui.height_spin,
+                       gui.width_spin, gui.show_subsets, gui.show_score,
+                       gui.role_button, gui.deselect_button, gui.brush_radius):
+            assert widget.toolTip(), widget
+    finally:
+        gui.close()
+
+
+def test_no_tooltip_or_hint_uses_a_name_the_interface_dropped():
+    """Stale help is worse than none: it names a control that is not there."""
+    gui = make_gui()
+    try:
+        texts = [w.toolTip() for w in gui.findChildren(QtWidgets.QWidget)]
+        texts += list(STEP_HINTS.values())
+        for text in texts:
+            lowered = text.lower()
+            assert 'minimum distance' not in lowered
+            assert 'fraction of the maximum' not in lowered
+            assert 'find points' not in lowered
+    finally:
+        gui.close()
+
+
+# ---------------------------------------------------------------------------
+# Odd subset sizes
+# ---------------------------------------------------------------------------
+
+def test_the_subset_size_steps_in_odds():
+    """A subset is centred on its point, so an even extent has no centre to be."""
+    gui = make_gui(subset_size=11)
+    try:
+        gui.height_spin.stepUp()
+        assert gui.height_spin.value() == 13
+        gui.height_spin.stepDown()
+        gui.height_spin.stepDown()
+        assert gui.height_spin.value() == 9
+    finally:
+        gui.close()
+
+
+def test_an_even_subset_size_cannot_be_typed_in():
+    gui = make_gui()
+    try:
+        gui.height_spin.lineEdit().setText('12')
+        gui.height_spin.interpretText()
+        assert gui.height_spin.value() == 13
+    finally:
+        gui.close()
+
+
+def test_an_even_subset_size_is_rounded_up_on_the_way_in():
+    """The pipeline and the control that shows it must not disagree."""
+    gui = make_gui(subset_size=(10, 20))
+    try:
+        assert gui.pipeline.subset_size == (11, 21)
+        assert (gui.height_spin.value(), gui.width_spin.value()) == (11, 21)
+    finally:
+        gui.close()
+
+
+def test_the_square_toggle_keeps_both_odd():
+    gui = make_gui(subset_size=(11, 21))
+    try:
+        gui.square_check.setChecked(True)
+        assert gui.width_spin.value() == gui.height_spin.value()
+        assert gui.pipeline.subset_size == (11, 11)
+    finally:
+        gui.close()
+
+
+# ---------------------------------------------------------------------------
 # Removing a point by clicking it
 # ---------------------------------------------------------------------------
 
 def test_the_remove_tool_takes_a_point_away_every_time():
+    """The regression: only the first click did anything.
+
+    ``erased`` was grown with an in-place write, and the pipeline identifies
+    that array by object -- so once it existed, no later click changed anything
+    the rasterisation cache could see.
+    """
     gui = gui_with_region()
     try:
+        gui.select_step(STEP_MASK)
         gui.select_tool('remove')
         for _ in range(4):
             target = tuple(int(v) for v in gui._points[0])
@@ -530,6 +1395,7 @@ def test_the_remove_tool_takes_a_point_away_every_time():
 def test_removing_a_point_is_undoable():
     gui = gui_with_region()
     try:
+        gui.select_step(STEP_MASK)
         gui.select_tool('remove')
         before = len(gui._points)
         target = tuple(int(v) for v in gui._points[0])
@@ -563,8 +1429,9 @@ def test_a_click_far_from_every_point_removes_nothing():
 # ---------------------------------------------------------------------------
 
 def test_a_click_outside_the_image_adds_no_point():
-    gui = make_gui()
+    gui = empty_gui()
     try:
+        gui.select_step(STEP_MASK)
         gui.select_tool('points')
         rows, cols = gui.pipeline.shape
         gui.add_point((rows + 40.0, 20.0))
@@ -575,8 +1442,9 @@ def test_a_click_outside_the_image_adds_no_point():
 
 
 def test_a_click_on_the_image_still_adds_one():
-    gui = make_gui()
+    gui = empty_gui()
     try:
+        gui.select_step(STEP_MASK)
         gui.select_tool('points')
         gui.add_point((80.0, 120.0))
         assert gui.pipeline.entries[0].geometry == [(80, 120)]
@@ -586,18 +1454,60 @@ def test_a_click_on_the_image_still_adds_one():
 
 def test_an_off_frame_point_cannot_reach_the_result():
     """Whatever route it arrived by -- it is an index error in every array."""
-    gui = make_gui()
+    gui = empty_gui()
     try:
         gui.pipeline.add_entry('points', [(80, 120), (999, 120)])
         gui.refresh()
         assert [tuple(p) for p in gui.get_points()] == [(80, 120)]
+
+        gui.deselect_button.setChecked(True)
+        gui.brush_start()
+        gui.brush_move((80.0, 120.0))       # would index row 999 of a 160-row frame
+        gui.brush_end()
     finally:
         gui.close()
 
 
 # ---------------------------------------------------------------------------
-# The score overlay is part of the redraw
+# What an evaluator change costs
+#
+# This is the one control that can make a redraw expensive: a parameter the
+# store has not scored before is a whole-frame evaluation.
 # ---------------------------------------------------------------------------
+
+def select_evaluator(gui, name):
+    """Put the evaluator combo on a registry name."""
+    for index in range(gui.evaluator_combo.count()):
+        if gui.evaluator_combo.itemData(index) == name:
+            gui.evaluator_combo.setCurrentIndex(index)
+            return
+    raise AssertionError(f'no {name!r} in the evaluator menu')
+
+
+def test_a_parameter_change_is_coalesced_like_every_other_control():
+    gui = gui_with_region()
+    try:
+        select_evaluator(gui, 'gradient_direction')
+        gui.refresh()
+        gui._last_refresh_ms = REDRAW_BUDGET_MS + 1
+        gui.direction_spins[0].setValue(0.37)
+        assert gui._refresh_timer.isActive()
+    finally:
+        gui.close()
+
+
+def test_dragging_a_parameter_does_not_hoard_a_score_per_value():
+    """Each one is a full-frame float32; sixty of them is a gigabyte at 4 MP."""
+    gui = gui_with_region()
+    try:
+        select_evaluator(gui, 'gradient_direction')
+        for step in range(40):
+            gui.direction_spins[0].setValue(0.02 * step)
+            gui.flush_refresh()
+        assert len(gui.pipeline.store._cache) <= gui.pipeline.store.max_cached
+    finally:
+        gui.close()
+
 
 def test_the_score_overlay_follows_a_change_of_subset_size():
     """It is drawn from the score, so it has to be part of the redraw."""
@@ -606,6 +1516,7 @@ def test_the_score_overlay_follows_a_change_of_subset_size():
         gui.show_score.setChecked(True)
         before = gui.score_overlay.image.copy()
         gui.height_spin.setValue(31)
+        gui.flush_refresh()
         assert not np.array_equal(gui.score_overlay.image, before)
     finally:
         gui.close()
@@ -646,8 +1557,9 @@ class FakeDrag:
 
 def test_ctrl_is_read_off_the_event_not_tracked():
     """A panel widget with focus can swallow the key; a tracked flag then lies."""
-    gui = make_gui()
+    gui = empty_gui()
     try:
+        gui.select_step(STEP_MASK)
         gui.select_tool('brush')
         assert not gui.view._handle_brush_drag(FakeDrag(ctrl=False, start=True))
         assert gui.view._handle_brush_drag(FakeDrag(ctrl=True, start=True))
@@ -658,8 +1570,9 @@ def test_ctrl_is_read_off_the_event_not_tracked():
 
 def test_letting_go_of_ctrl_mid_stroke_still_finishes_the_stroke():
     """Otherwise the drag stops being handled and the stroke is silently lost."""
-    gui = make_gui()
+    gui = empty_gui()
     try:
+        gui.select_step(STEP_MASK)
         gui.select_tool('brush')
         gui.view._handle_brush_drag(FakeDrag(ctrl=True, start=True))
         gui.brush_move((80.0, 120.0))
@@ -690,5 +1603,17 @@ def test_an_undo_snapshot_does_not_copy_the_erased_arrays():
         assert entry.erased is not None
         held = {id(state[1]) for state in gui._snapshot()['state']}
         assert id(entry.erased) in held
+    finally:
+        gui.close()
+
+
+def test_the_seeded_row_is_recognised_by_identity_not_by_its_label():
+    gui = make_gui()
+    try:
+        seeded = gui._whole_image
+        seeded.label = 'Renamed by hand'
+        gui.pipeline.add_entry('polygon', rect(20, 20, 140, 220))
+        gui._retire_whole_image()
+        assert not seeded.visible
     finally:
         gui.close()
