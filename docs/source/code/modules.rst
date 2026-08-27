@@ -7,6 +7,12 @@ Video Reader
 .. automodule:: pyidi.video_reader
     :members:
 
+Example datasets
+----------------
+
+.. automodule:: pyidi.datasets
+    :members:
+
 IDIMethod base class
 -------------------
 

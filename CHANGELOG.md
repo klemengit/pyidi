@@ -3,6 +3,31 @@
 This changelog starts at version 1.4.0. For earlier versions see the
 [commit history](https://github.com/ladisk/pyidi/commits/master).
 
+## Unreleased
+
+### Example datasets
+
+`pyidi.datasets` downloads example recordings from Zenodo on first use and
+caches them in `~/.pyidi/datasets` (or in `PYIDI_DATA_DIR`):
+
+```python
+video = pyidi.datasets.load_music_box()
+```
+
+The first dataset is a high-speed video of a vibrating music-box comb
+([10.5281/zenodo.22105821](https://doi.org/10.5281/zenodo.22105821), CC BY 4.0).
+Only the requested frames are downloaded, using HTTP range requests, so the
+default window costs 404 MiB instead of the 2 GiB of the published excerpt (or
+the 36 GiB of the full recording). An interrupted download is resumed. The new
+`examples/Showcase_music_box.ipynb` walks from the raw video to the notes of
+the comb and to the operating deflection shape of a single tooth.
+
+### Fixes
+
+`configure(show_pbar=False)` was ignored by `LucasKanade` and `DIC` when running
+in a single process; the progress bar was always shown. `DirectionalLucasKanade`
+already honoured the setting.
+
 ## 1.4.0
 
 ### Lucas-Kanade performance

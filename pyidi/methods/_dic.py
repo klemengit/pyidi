@@ -312,7 +312,7 @@ class DIC(IDIMethod):
     def _run_time_loop(self, video, current_warps):
         """Iterate over frames, optimizing each point and storing results."""
         len_of_task = len(range(self.start_time, self.stop_time, self.step_time))
-        for ii, i in enumerate(progress_bar(self.start_time, self.stop_time, self.step_time)):
+        for ii, i in enumerate(progress_bar(self.start_time, self.stop_time, self.step_time, show_pbar=self.show_pbar)):
             if self.resume_analysis and hasattr(self, "completed_points") and self.completed_points > ii:
                 continue
             ii = ii + 1

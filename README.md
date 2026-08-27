@@ -99,6 +99,39 @@ video.set_points(points=p)
 Or use point selection UI to set individual points or grid inside selected area. For more information about UI see [documentation](https://pyidi.readthedocs.io/en/quick_start/napari.html). Launch viewer with:
 
 
+# EXAMPLE DATASET:
+A high-speed video of a vibrating music-box comb is published on Zenodo
+([10.5281/zenodo.22105821](https://doi.org/10.5281/zenodo.22105821), CC BY 4.0) and can be
+loaded directly from `pyidi`. Only the requested frames are downloaded and they are cached
+in `~/.pyidi/datasets` (or in `PYIDI_DATA_DIR`), so the first call is the only slow one:
+
+```python
+import pyidi
+
+# 600 frames of 640x552 px, 16-bit: 404 MiB on the first call
+video = pyidi.datasets.load_music_box()
+
+lk = pyidi.LucasKanade(video)
+lk.set_points([[109, 500], [175, 500], [329, 500]])   # three teeth of the comb
+lk.configure(roi_size=(21, 51))                       # a region one tooth tall
+displacements = lk.get_displacements()
+```
+
+The comb was recorded with a Photron FASTCAM SA-Z at 7500 fps. Its teeth are cantilevers of
+graduated length, so each rings at its own natural frequencies, with sub-pixel amplitudes on
+a naturally speckled surface — a convenient benchmark for displacement identification. The
+identified frequencies land within a few cents of equal-tempered pitches across nearly two
+octaves:
+
+<img src="docs/source/quick_start/music_box_teeth.png" width="800" />
+
+The full example is in [`examples/Showcase_music_box.ipynb`](examples/Showcase_music_box.ipynb):
+from the raw video to the notes of the comb and to the operating deflection shape of a single
+tooth. If you use the dataset, please cite it:
+
+- Stanovnik, G., & Slavič, J. (2026). **High-speed video of a vibrating music-box comb
+  (Photron FASTCAM SA-Z, 7500 fps, 640x552 px)** [Data set]. Zenodo. https://doi.org/10.5281/zenodo.22105821
+
 # DEVELOPER GUIDELINES:
 * Add _name_of_method.py with class that inherits after `IDIMethods`
 * This class must have methods:
