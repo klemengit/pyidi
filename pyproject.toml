@@ -55,6 +55,7 @@ dev = [
     "twine",
     "build",
     "pytest",
+    "sdypy-io",
     "sphinx-book-theme",
     "sphinx-copybutton",
     "nbsphinx",
