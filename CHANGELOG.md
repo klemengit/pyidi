@@ -378,6 +378,16 @@ converge. The error is now returned as its absolute value.
 
 ### Fixed
 
+- **`import pyidi` failed outright when PyQt6 was installed without napari.**
+  `pyidi.GUIs` gated every class on PyQt6 alone and then imported the napari
+  `GUI` unconditionally, so `pip install pyqt6 pyqtgraph` without the `[qt]`
+  extra produced a `ModuleNotFoundError` from inside a submodule and took the
+  whole package down with it. Each class now checks its own dependencies:
+  `SelectionGUI`, `SelectionGUIOld`, `ResultViewer` and `Viewer` need PyQt6 and
+  pyqtgraph, the napari `GUI` needs napari and magicgui, and whichever are
+  unavailable become stubs that import cleanly and raise `RuntimeError` on
+  construction naming the missing packages. `Viewer` had no such stub at all
+  and raised `NameError`.
 - **Asymmetric `pad` in `DirectionalLucasKanade` crashed every point.**
   `_interpolate_reference` and `_warm_up_kernels` paired the `(pad_y, pad_x)`
   axes in the opposite order to `_padded_slice`, so a non-square `pad` (e.g.
