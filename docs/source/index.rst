@@ -104,6 +104,7 @@ What pyIDI does
    installation
    quick_start/basic_usage
    quick_start/video_reader
+   datasets
    quick_start/points_selection
    quick_start/feature_selection
    quick_start/napari

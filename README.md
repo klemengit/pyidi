@@ -68,6 +68,48 @@ displacements = gui.method.displacements
 
 <img src="docs/source/quick_start/gifs/napari_full_sof.gif" width="800" />
 
+## Example dataset
+
+No recording of your own yet? A high-speed video of a vibrating music-box comb is
+published on Zenodo ([10.5281/zenodo.22105821](https://doi.org/10.5281/zenodo.22105821),
+CC BY 4.0) and loads directly from `pyidi`. Only the frames you ask for are downloaded,
+and they are cached in `~/.pyidi/datasets` (or in `PYIDI_DATA_DIR`), so only the first
+call is slow:
+
+```python
+import pyidi
+
+# 600 frames of 640x552 px, 16-bit: 404 MiB on the first call
+video = pyidi.datasets.load_music_box()
+
+lk = pyidi.LucasKanade(video)
+lk.set_points([[109, 500], [175, 500], [329, 500]])   # three teeth of the comb
+lk.configure(roi_size=(21, 51))                       # a region one tooth tall
+displacements = lk.get_displacements()
+```
+
+The comb was recorded with a Photron FASTCAM SA-Z at 7500 fps. Its teeth are cantilevers
+of graduated length, so each rings at its own natural frequencies, with sub-pixel
+amplitudes on a naturally speckled surface — a convenient benchmark for displacement
+identification. The identified frequencies land within a few cents of equal-tempered
+pitches across nearly two octaves:
+
+<img src="docs/source/quick_start/music_box_teeth.png" width="800" />
+
+Datasets are a registry, so this one is loaded like any other:
+`pyidi.datasets.list_datasets()` says what is available,
+`pyidi.datasets.load_dataset('music_box')` loads it, and
+`pyidi.datasets.register_dataset()` accepts a recording of your own published the same
+way — a Zenodo record with a Photron `cihx` header next to an uncompressed `mraw` file.
+
+The full example is in [`examples/Showcase_music_box.ipynb`](examples/Showcase_music_box.ipynb):
+from the raw video to the notes of the comb and to the operating deflection shape of a
+single tooth. If you use the dataset, please cite it:
+
+- Stanovnik, G., & Slavič, J. (2026). **High-speed video of a vibrating music-box comb
+  (Photron FASTCAM SA-Z, 7500 fps, 640x552 px)** [Data set]. Zenodo.
+  https://doi.org/10.5281/zenodo.22105821
+
 ## Methods
 
 | Method | Solves for | Use it when |

@@ -219,7 +219,7 @@ class LucasKanade(IDIMethod):
 
         # Time iteration.
         len_of_task = len(range(self.start_time, self.stop_time, self.step_time))
-        for ii, i in enumerate(progress_bar(self.start_time, self.stop_time, self.step_time)):
+        for ii, i in enumerate(progress_bar(self.start_time, self.stop_time, self.step_time, show_pbar=self.show_pbar)):
 
             # if resuming analysis and completed points are available, skip those points
             if self.resume_analysis and hasattr(self, "completed_points") and self.completed_points > ii:

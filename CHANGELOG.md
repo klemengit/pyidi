@@ -226,6 +226,32 @@ border used values reflected from inside it; the whole-image version sees the
 real neighbours. The new value is the correct one. This affects the new module
 only — `SelectionGUI` is untouched and behaves exactly as before.
 
+### Example datasets
+
+`pyidi.datasets` downloads example recordings from Zenodo on first use and
+caches them in `~/.pyidi/datasets` (or in `PYIDI_DATA_DIR`):
+
+```python
+video = pyidi.datasets.load_music_box()
+```
+
+The first dataset is a high-speed video of a vibrating music-box comb
+([10.5281/zenodo.22105821](https://doi.org/10.5281/zenodo.22105821), CC BY 4.0).
+Only the requested frames are downloaded, using HTTP range requests, so the
+default window costs 404 MiB instead of the 2 GiB of the published excerpt (or
+the 36 GiB of the full recording). An interrupted download is resumed. The new
+`examples/Showcase_music_box.ipynb` walks from the raw video to the notes of
+the comb and to the operating deflection shape of a single tooth.
+
+A dataset is a dictionary of metadata in the `pyidi.datasets.DATASETS` registry,
+so the next one needs no new code: `list_datasets()` says what is available,
+`load_dataset(name)` loads any of it, and `register_dataset()` accepts a
+recording that is not part of pyidi. The named shortcuts, `load_music_box()` and
+`fetch_music_box()`, remain. What the registry assumes is what every dataset
+published this way has in common — a Zenodo record holding a Photron `cihx`
+header next to an uncompressed `mraw` file of fixed-size frames, so that a
+window can be addressed by byte offset.
+
 ### Documentation overhaul
 
 The documentation was restructured around the work done since 1.3.3. New
@@ -354,6 +380,9 @@ converge. The error is now returned as its absolute value.
   removed only once nothing is left painted. Because the mask itself is
   edited rather than its derived points, the deselection also survives a
   subset-size or spacing change.
+- **`configure(show_pbar=False)` was ignored by `LucasKanade` and `DIC`** when
+  running in a single process; the progress bar was always shown.
+  `DirectionalLucasKanade` already honoured the setting.
 
 ### Point selection consolidated on `SelectionGUI`
 

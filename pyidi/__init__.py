@@ -25,6 +25,7 @@ if not _THREADING_LAYER_FROM_ENV:
 from .pyidi_legacy import pyIDI
 from . import tools
 from . import postprocessing
+from . import datasets
 from .load_analysis import load_analysis
 from .video_reader import VideoReader
 from . import selection
