@@ -616,7 +616,8 @@ class SelectionGUI(QtWidgets.QMainWindow):
         self.new_entry_button.clicked.connect(self.start_new_entry)
         layout.addWidget(self.new_entry_button)
 
-        brush = QtWidgets.QGroupBox('Brush (hold Ctrl and drag to paint)')
+        self.brush_group = QtWidgets.QGroupBox('Brush (hold Ctrl and drag to paint)')
+        brush = self.brush_group
         brush_column = QtWidgets.QVBoxLayout(brush)
         self.brush_radius = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
         self.brush_radius.setRange(1, 100)
@@ -633,6 +634,10 @@ class SelectionGUI(QtWidgets.QMainWindow):
         self.deselect_button.toggled.connect(self._set_deselect_mode)
         brush_column.addWidget(self.deselect_button)
         layout.addWidget(brush)
+        # Painting is gated on the brush being the active tool (see
+        # ``_handle_brush_drag``), so with any other tool these two controls do
+        # nothing at all.
+        brush.setVisible(self.tool == 'brush')
 
         self.spacing_spin = QtWidgets.QSpinBox()
         self.spacing_spin.setRange(-500, 500)
@@ -642,9 +647,10 @@ class SelectionGUI(QtWidgets.QMainWindow):
             'Extra spacing between the points a "points" row lays out. Rows that '
             'act as a mask are unaffected: how far apart their points end up is '
             'the separation, on the other tab.')
-        spacing = self._form()
-        spacing.addRow('Point spacing', self.spacing_spin)
-        layout.addLayout(spacing)
+        self.spacing_form = self._form()
+        self.spacing_form.addRow('Point spacing', self.spacing_spin)
+        layout.addLayout(self.spacing_form)
+        self._update_spacing_row()
 
         # The overlay is as useful here as on the other tab: it is what tells you
         # whether the area you are about to keep has anything worth tracking in it.
@@ -946,6 +952,7 @@ class SelectionGUI(QtWidgets.QMainWindow):
         """
         self.tool = kind
         self.tool_buttons[kind].setChecked(True)
+        self.brush_group.setVisible(kind == 'brush')
         self.new_entry_button.setEnabled(kind in VERTEX_KINDS)
         if kind in VERTEX_KINDS:
             self.new_entry_button.setText(f'Start new {"polygon" if kind == "polygon" else "line"}')
@@ -1373,6 +1380,22 @@ class SelectionGUI(QtWidgets.QMainWindow):
         self.pipeline.selector_params['max_points'] = value
         self.request_refresh()
 
+    def _update_spacing_row(self):
+        """Show ``Point spacing`` only while a row exists that it can move.
+
+        It reaches exactly one place, :func:`~pyidi.selection.masks.literal_points`,
+        and only for a row that *lays points out*: a polygon, line or brush
+        stroke in the ``points`` role, whose coordinates are spaced along or
+        inside the shape. It cannot change the answer for the other two kinds of
+        row. A ``mask`` row has its points chosen by the selection instead, so
+        what sets their distance is the separation on the other tab; a
+        ``points``-*tool* row is the coordinates you clicked, which spacing has
+        no say over.
+        """
+        spaced = any(entry.role == 'points' and entry.kind != 'points'
+                     for entry in self.pipeline.entries)
+        self.spacing_form.setRowVisible(self.spacing_spin, spaced)
+
     def _update_selector_rows(self):
         """Show only the rows the current selector actually reads."""
         peaks = self.selector_combo.currentData() == 'peaks'
@@ -1623,6 +1646,7 @@ class SelectionGUI(QtWidgets.QMainWindow):
         started = time.perf_counter()
         self._points, self._credited = self.pipeline.points_and_credits()
         self._refresh_list(self._credited)
+        self._update_spacing_row()
         self.count_label.setText(f'{len(self._points)} points')
         self.draw_points()
         self.draw_candidates()

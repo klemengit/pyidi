@@ -1719,3 +1719,66 @@ def test_the_seeded_row_is_recognised_by_identity_not_by_its_label():
         assert not seeded.visible
     finally:
         gui.close()
+
+
+# ---------------------------------------------------------------------------
+# The mask tab shows only what the current tool and rows can act on
+# ---------------------------------------------------------------------------
+
+def test_the_brush_controls_follow_the_brush_tool():
+    """Painting is gated on the tool, so with any other one these do nothing."""
+    gui = make_gui()
+    try:
+        gui.select_step(STEP_MASK)
+
+        gui.select_tool('polygon')
+        assert not gui.brush_group.isVisible()
+
+        gui.select_tool('brush')
+        assert gui.brush_group.isVisible()
+        assert gui.brush_radius.isVisible()
+        assert gui.deselect_button.isVisible()
+
+        gui.select_tool('points')
+        assert not gui.brush_group.isVisible()
+    finally:
+        gui.close()
+
+
+def test_point_spacing_appears_only_for_a_row_that_lays_points_out():
+    """It reaches ``literal_points`` and nowhere else."""
+    gui = make_gui()
+    try:
+        gui.select_step(STEP_MASK)
+        # Only the seeded whole-image mask so far: nothing spacing can move.
+        assert not gui.spacing_spin.isVisible()
+
+        entry = gui.pipeline.add_entry('polygon', rect(20, 20, 140, 220))
+        gui.refresh()
+        assert not gui.spacing_spin.isVisible()
+
+        entry.role = 'points'
+        gui.refresh()
+        assert gui.spacing_spin.isVisible()
+
+        entry.role = 'mask'
+        gui.refresh()
+        assert not gui.spacing_spin.isVisible()
+    finally:
+        gui.close()
+
+
+def test_point_spacing_stays_hidden_for_hand_clicked_points():
+    """A ``points``-tool row is the coordinates you clicked; spacing has no say."""
+    gui = make_gui()
+    try:
+        gui.select_step(STEP_MASK)
+        gui.pipeline.add_entry('points', [(40, 40), (60, 60)])
+        gui.refresh()
+        assert not gui.spacing_spin.isVisible()
+
+        gui.pipeline.add_entry('polyline', [(30, 30), (30, 200)])
+        gui.refresh()
+        assert gui.spacing_spin.isVisible()
+    finally:
+        gui.close()
