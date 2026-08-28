@@ -23,6 +23,8 @@ These names are importable directly from ``pyidi``:
      - The displacement identification methods.
    * - ``SelectionGUI``
      - Interactive point selection (requires the ``[qt]`` extra).
+   * - ``SelectionGUIOld``
+     - The 1.3 point-selection window, deprecated and removed in 1.5.
    * - ``GUI``, ``ResultViewer``, ``Viewer``
      - napari and Qt viewers (require the ``[qt]`` extra).
    * - ``load_analysis``
@@ -109,8 +111,8 @@ Fiducial markers
 Point selection geometry
 ------------------------
 
-Pure-numpy ROI-grid geometry, shared by the napari ``GUI`` and
-``SelectionGUI``. No GUI toolkit is needed to import or use it.
+Pure-numpy ROI-grid geometry, shared by the napari ``GUI``, ``SelectionGUI``
+and ``SelectionGUIOld``. No GUI toolkit is needed to import or use it.
 
 .. warning::
 

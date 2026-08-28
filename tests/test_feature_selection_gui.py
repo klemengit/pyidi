@@ -1,4 +1,4 @@
-"""Tests for ``FeatureSelectionGUI``, the interface over the selection pipeline.
+"""Tests for ``SelectionGUI``, the interface over the selection pipeline.
 
 Constructed headlessly, by the same recipe as
 ``tests/test_selection_gui_anisotropic.py``:
@@ -36,7 +36,7 @@ sys.ps1 = getattr(sys, "ps1", ">>> ")
 QtWidgets.QApplication.exec = lambda self=None: 0
 
 from pyidi.GUIs.feature_selection import (  # noqa: E402
-    REDRAW_BUDGET_MS, STEP_FIND, STEP_HINTS, STEP_MASK, FeatureSelectionGUI)
+    REDRAW_BUDGET_MS, STEP_FIND, STEP_HINTS, STEP_MASK, SelectionGUI)
 
 
 def make_image():
@@ -47,7 +47,7 @@ def make_image():
 
 def make_gui(**kwargs):
     """A headless window on a fresh synthetic frame, as the user gets it."""
-    return FeatureSelectionGUI(make_image(), **kwargs)
+    return SelectionGUI(make_image(), **kwargs)
 
 
 def empty_gui(**kwargs):
@@ -89,7 +89,7 @@ def test_constructor_accepts_a_2d_image():
 
 def test_constructor_accepts_a_frame_stack():
     stack = np.stack([make_image(), make_image()])
-    gui = FeatureSelectionGUI(stack)
+    gui = SelectionGUI(stack)
     try:
         np.testing.assert_array_equal(gui.frame, stack[0])
     finally:
@@ -98,7 +98,7 @@ def test_constructor_accepts_a_frame_stack():
 
 def test_constructor_rejects_an_unusable_input():
     with pytest.raises(TypeError, match='VideoReader'):
-        FeatureSelectionGUI('not a video')
+        SelectionGUI('not a video')
 
 
 def test_constructor_normalises_an_anisotropic_subset_size():
@@ -666,13 +666,38 @@ def test_the_lattice_selector_gives_regular_spacing():
 
 
 # ---------------------------------------------------------------------------
-# The existing interface is untouched
+# The names
 # ---------------------------------------------------------------------------
 
-def test_both_interfaces_are_importable():
-    from pyidi import SelectionGUI
+def test_selection_gui_names_this_interface():
+    """``SelectionGUI`` is this class, not the 1.3 window it replaced."""
+    import pyidi
 
-    assert SelectionGUI is not FeatureSelectionGUI
+    assert pyidi.SelectionGUI is SelectionGUI
+
+
+def test_the_old_interface_is_still_reachable_under_its_own_name():
+    import pyidi
+    from pyidi.GUIs.subset_selection import SelectionGUIOld
+
+    assert pyidi.SelectionGUIOld is SelectionGUIOld
+    assert pyidi.SelectionGUIOld is not pyidi.SelectionGUI
+
+
+def test_the_old_interface_warns_on_construction():
+    from pyidi import SelectionGUIOld
+
+    with pytest.deprecated_call():
+        gui = SelectionGUIOld(make_image())
+    gui.close()
+
+
+def test_the_working_name_says_where_it_went():
+    """``FeatureSelectionGUI`` never shipped, but it is in the design notes."""
+    import pyidi
+
+    with pytest.raises(RuntimeError, match='now called SelectionGUI'):
+        pyidi.FeatureSelectionGUI()
 
 
 # ---------------------------------------------------------------------------
@@ -1066,7 +1091,7 @@ def test_quality_keeps_the_points_off_the_blank_background():
     frame = np.clip(frame.astype(int) + np.random.default_rng(3).integers(-5, 6, frame.shape),
                     0, 255).astype(np.uint8)
 
-    gui = FeatureSelectionGUI(frame, subset_size=11)
+    gui = SelectionGUI(frame, subset_size=11)
     try:
         for position in (1000, 750, 500, 333):
             gui.threshold_slider.setValue(position)

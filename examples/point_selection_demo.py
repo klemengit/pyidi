@@ -1,15 +1,18 @@
-"""Manual test-drive of the consolidated point-selection interface.
+"""Manual test-drive of ``SelectionGUIOld``, the deprecated selection window.
+
+Kept so the 1.3 interface can still be exercised while it is around. For the
+interface ``SelectionGUI`` names today, see ``feature_selection_demo.py``.
 
 Run this CELL BY CELL in an interactive session (molten.nvim, IPython, VS Code),
 not with ``python examples/point_selection_demo.py``.
 
-Why: ``SelectionGUI.__init__`` ends with ``sys.exit(app.exec())`` whenever
+Why: ``SelectionGUIOld.__init__`` ends with ``sys.exit(app.exec())`` whenever
 ``sys.ps1`` is absent, which is the case for a plain script run. The window would
 open, and closing it would terminate the interpreter before any of the checks
 below could run. In an interactive session it calls a bare ``app.exec()`` instead,
 which blocks until you close the window and then hands control back.
 
-Either way the GUI is modal: execution stops at the ``SelectionGUI(...)`` line
+Either way the GUI is modal: execution stops at the ``SelectionGUIOld(...)`` line
 until you close the window. Select your points, then close it to continue.
 
 Requires the Qt extras:  pip install pyidi[qt]
@@ -89,7 +92,7 @@ print(f'{video.N} frames, {video.image_height} x {video.image_width} (height x w
 # CLOSE THE WINDOW to continue.
 # ---------------------------------------------------------------------------
 
-gui = pyidi.SelectionGUI(video, subset_size=11, subset_overlap=0)
+gui = pyidi.SelectionGUIOld(video, subset_size=11, subset_overlap=0)
 
 # %%
 
@@ -172,7 +175,7 @@ print(f'stored: {sof.points.tolist()}  dtype {sof.points.dtype}')
 
 # %%
 # ---------------------------------------------------------------------------
-# 5. SelectionGUI now accepts a plain numpy array, as its docstring always
+# 5. SelectionGUIOld now accepts a plain numpy array, as its docstring always
 #    claimed. This raised AttributeError before.
 #    CLOSE THE WINDOW to continue.
 # ---------------------------------------------------------------------------
@@ -180,13 +183,13 @@ print(f'stored: {sof.points.tolist()}  dtype {sof.points.dtype}')
 frames = video.get_frames()               # (n_frames, height, width)
 print(f'passing a 3-D array {frames.shape}')
 
-gui_arr = pyidi.SelectionGUI(frames, subset_size=9)
+gui_arr = pyidi.SelectionGUIOld(frames, subset_size=9)
 print(f'frame used: {gui_arr.frame.shape}  (should be 2-D: {frames.shape[1:]})')
 
 # %%
 # A single 2-D image should work too. CLOSE THE WINDOW to continue.
 
-gui_img = pyidi.SelectionGUI(frames[0], subset_size=9)
+gui_img = pyidi.SelectionGUIOld(frames[0], subset_size=9)
 print(f'frame used: {gui_img.frame.shape}')
 
 # %%
@@ -194,7 +197,7 @@ print(f'frame used: {gui_img.frame.shape}')
 # missing attribute deep in the constructor.
 
 try:
-    pyidi.SelectionGUI('not a video')
+    pyidi.SelectionGUIOld('not a video')
 except TypeError as e:
     print(f'TypeError: {e}')
 
@@ -231,7 +234,7 @@ if getattr(lk, 'failed_points', None):      # a dict, empty when everything trac
 
 # %%
 # ---------------------------------------------------------------------------
-# 8. Optional: the napari GUI, which is a separate interface from SelectionGUI.
+# 8. Optional: the napari GUI, a separate interface again.
 #    Its point selection now routes through set_points too, so an out-of-bounds
 #    pick warns instead of being accepted silently.
 #

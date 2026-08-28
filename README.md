@@ -48,12 +48,18 @@ gui = SelectionGUI(video, subset_size=21)
 lk.set_points(gui)
 ```
 
-`SelectionGUI` offers a grid inside a polygon, manual points, points along a
-polyline, a brush, and automatic filtering onto well-textured image content —
-plus vertex dragging and undo. See the
-[documentation](https://pyidi.readthedocs.io/en/latest/quick_start/points_selection.html).
+`SelectionGUI` scores every position in the frame and picks the
+best-separated features inside the region you draw, so it finds the points
+rather than filtering a grid you placed. Draw with a polygon, a brush, a
+polyline or single clicks; set a region's role to `points` and it lays them
+out without scoring. Vertex dragging and undo throughout. See the
+[documentation](https://pyidi.readthedocs.io/en/latest/quick_start/feature_selection.html).
 
-<img src="docs/source/quick_start/selection.gif" width="800" />
+The window `SelectionGUI` named in 1.3 is now `SelectionGUIOld` — deprecated,
+and removed in 1.5. It takes the same arguments and returns the same points,
+so scripts carry over unchanged.
+
+<img src="docs/source/quick_start/feature_selection.gif" width="800" />
 
 ### Or drive everything from the napari UI
 

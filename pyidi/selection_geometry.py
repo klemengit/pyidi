@@ -6,7 +6,7 @@ depends on ``numpy`` and ``matplotlib.path.Path``.
 
 The functions here were moved, unchanged in behaviour, out of the selection
 GUIs, so that the geometry can be tested without a GUI toolkit and shared
-between the napari GUI and ``SelectionGUI``.
+between the napari GUI, ``SelectionGUI`` and ``SelectionGUIOld``.
 
 They do **not** share a common coordinate convention -- each docstring below
 states explicitly which convention that function uses, since this differs
@@ -145,7 +145,7 @@ def points_along_polygon(polygon, subset_size, spacing=0):
     """Place evenly-spaced points along the segments of an open polygon.
 
     Coordinate convention: (x, y) throughout -- ``polygon`` is a sequence
-    of ``(x, y)`` vertices, as stored by ``SelectionGUI``, and the returned
+    of ``(x, y)`` vertices, as stored by ``SelectionGUIOld``, and the returned
     points are ``(x, y)`` pairs (each shifted by -0.5 and rounded to the
     nearest integer, to align with pixel centres).
 
@@ -217,7 +217,7 @@ def rois_inside_polygon(polygon, subset_size, spacing):
     """Generate a regular grid of points inside a closed polygon.
 
     Coordinate convention: (x, y) throughout -- ``polygon`` is a sequence
-    of ``(x, y)`` vertices, as stored by ``SelectionGUI``, and the returned
+    of ``(x, y)`` vertices, as stored by ``SelectionGUIOld``, and the returned
     points are ``(x, y)`` pairs.
 
     Parameters

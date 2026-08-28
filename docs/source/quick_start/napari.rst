@@ -7,7 +7,7 @@ Interactive image viewer **napari** is implemented and can be used for viewing v
 
 The napari ``GUI`` covers the whole workflow — selecting points, configuring
 the method and running the identification — in one window. For point selection
-on its own, with grids, polylines, a brush and automatic filtering, use
+on its own, with regions, a brush and feature scoring, use
 :ref:`SelectionGUI <point-selection>` instead.
 
 .. note::

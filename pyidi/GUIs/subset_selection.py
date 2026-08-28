@@ -1,4 +1,6 @@
 import sys
+import warnings
+
 import numpy as np
 from PyQt6 import QtWidgets, QtCore, QtGui
 from pyqtgraph import GraphicsLayoutWidget, ImageItem, ScatterPlotItem
@@ -13,7 +15,7 @@ from ..selection_geometry import points_along_polygon, rois_inside_polygon, rois
 VERTEX_GRAB_RADIUS_PX = 10
 
 #: Row-label prefix for each non-manual selection-entry kind, used by
-#: ``SelectionGUI.add_selection`` to generate monotonic labels ("Grid 3", ...).
+#: ``SelectionGUIOld.add_selection`` to generate monotonic labels ("Grid 3", ...).
 PRETTY = {'line': 'Line', 'grid': 'Grid', 'brush': 'Brush'}
 
 
@@ -207,7 +209,34 @@ class BrushViewBox(pg.ViewBox):
         # fallback: pan
         super().mouseDragEvent(ev, axis)
 
-class SelectionGUI(QtWidgets.QMainWindow):
+class SelectionGUIOld(QtWidgets.QMainWindow):
+    """The point-selection interface of pyIDI 1.3, kept for one release.
+
+    .. deprecated:: 1.4
+        Use :class:`~pyidi.SelectionGUI` instead, which is what the name
+        ``SelectionGUI`` now refers to. This class is frozen and will be
+        removed in 1.5.
+
+    The replacement does everything this window does -- the same five tools,
+    the same two filters -- from a pipeline that scores the whole frame once
+    instead of one subset at a time, so it stays responsive while a slider is
+    still moving. The constructor signature is identical and ``get_points()``
+    returns the same ``(row, col)`` array, so most scripts need only the name
+    changed. What does not carry over:
+
+    - ``get_filtered_points()`` and ``get_selected_points()``. The replacement
+      has one ``get_points()``, because the filter is no longer a second pass
+      over an existing selection -- it is the selection.
+    - the internal attributes (``selections``, ``subset_size_spinbox``, ...),
+      which have no counterpart.
+
+    Two behaviours also differ, both deliberately. Scores near the image border
+    are computed on real neighbours rather than reflected ones, so they are
+    slightly different -- and correct. And "Grid" is no longer a mode: draw a
+    polygon and set its row to the ``points`` role, or use the ``lattice``
+    selector.
+    """
+
     def __init__(self, video, subset_size=11, subset_overlap=0):
         """Initialize the selection GUI for manual subset selection.
 
@@ -237,13 +266,22 @@ class SelectionGUI(QtWidgets.QMainWindow):
             ``width + subset_overlap``, which is enough to get a sensible anisotropic grid spacing
             without a second overlap control. Defaults to 0.
         """
+        warnings.warn(
+            "SelectionGUIOld is deprecated and will be removed in pyIDI 1.5. "
+            "Use SelectionGUI, which as of 1.4 is the interface built on "
+            "pyidi.selection; it takes the same arguments and returns the same "
+            "(row, col) points.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
         app = QtWidgets.QApplication.instance()
         if app is None:
             app = QtWidgets.QApplication([])
 
         super().__init__()
 
-        self.setWindowTitle("ROI Selection Tool")
+        self.setWindowTitle("ROI Selection Tool (deprecated)")
         self.resize(1200, 800)
 
         h, w = _as_size_pair(subset_size)
@@ -2258,6 +2296,6 @@ if __name__ == "__main__":
     example_image = (np.array(img).T)[:, ::-1]
 
 
-    Points = SelectionGUI(example_image.astype(np.uint8))
+    Points = SelectionGUIOld(example_image.astype(np.uint8))
 
     print(Points.get_points())  # # print selected points for testing

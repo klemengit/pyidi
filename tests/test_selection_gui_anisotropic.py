@@ -1,12 +1,12 @@
-"""Tests for anisotropic (non-square) subset sizes in ``SelectionGUI``.
+"""Tests for anisotropic (non-square) subset sizes in ``SelectionGUIOld``.
 
-``SelectionGUI`` is a full Qt application, but it can be constructed headlessly
+``SelectionGUIOld`` is a full Qt application, but it can be constructed headlessly
 for testing -- the same recipe used by
 ``docs/source/quick_start/make_selection_animation.py``:
 
 * ``QT_QPA_PLATFORM=offscreen`` must be set before Qt is imported, so Qt
   renders to its software framebuffer instead of opening a real display.
-* ``sys.ps1`` must be set before constructing ``SelectionGUI``, so its
+* ``sys.ps1`` must be set before constructing ``SelectionGUIOld``, so its
   constructor takes the "interactive" branch instead of ``sys.exit(...)``.
 * ``sys.ps1`` alone is not enough: the "interactive" branch still calls
   ``app.exec()``, which would block in the Qt event loop. So
@@ -27,11 +27,17 @@ pytest.importorskip("PyQt6")
 
 from PyQt6 import QtCore, QtGui, QtWidgets  # noqa: E402
 
-sys.ps1 = getattr(sys, "ps1", ">>> ")  # Make SelectionGUI think it's running interactively.
+sys.ps1 = getattr(sys, "ps1", ">>> ")  # Make SelectionGUIOld think it's running interactively.
 QtWidgets.QApplication.exec = lambda self=None: 0  # Neutralise the blocking event loop.
 
-from pyidi.GUIs.subset_selection import SelectionGUI  # noqa: E402
+from pyidi.GUIs.subset_selection import SelectionGUIOld  # noqa: E402
 from pyidi.selection_geometry import rois_inside_polygon  # noqa: E402
+
+# Every test here constructs the deprecated interface on purpose, so its own
+# DeprecationWarning is noise rather than a signal. The warning itself is
+# covered in tests/test_feature_selection_gui.py.
+pytestmark = pytest.mark.filterwarnings(
+    "ignore:SelectionGUIOld is deprecated:DeprecationWarning")
 
 
 def make_image():
@@ -41,8 +47,8 @@ def make_image():
 
 
 def make_gui(**kwargs):
-    """Construct a headless ``SelectionGUI`` on a fresh synthetic image."""
-    return SelectionGUI(make_image(), **kwargs)
+    """Construct a headless ``SelectionGUIOld`` on a fresh synthetic image."""
+    return SelectionGUIOld(make_image(), **kwargs)
 
 
 def make_image_128x256():
@@ -173,7 +179,7 @@ def test_rectangle_overlay_extent_matches_subset_size_axes():
     read as a row and 128 is out of the 0..127 row range) -- see the class
     docstring / bug report for why the ordering matters.
     """
-    gui = SelectionGUI(make_image_128x256(), subset_size=(5, 25))
+    gui = SelectionGUIOld(make_image_128x256(), subset_size=(5, 25))
     try:
         entry = gui.add_selection('manual', geometry=[(128, 64)])
         gui.recompute_entry(entry, gui.get_subset_size(), gui.distance_spinbox.value())
@@ -194,7 +200,7 @@ def test_square_subset_overlay_matches_independent_reference():
     """
     subset_size = 15
     half = subset_size // 2
-    gui = SelectionGUI(make_image_128x256(), subset_size=subset_size)
+    gui = SelectionGUIOld(make_image_128x256(), subset_size=subset_size)
     try:
         px, py = 128, 64
         entry = gui.add_selection('manual', geometry=[(px, py)])
@@ -234,7 +240,7 @@ def test_subset_border_path_traces_the_filled_area():
     """
     subset_size = 15
     half = subset_size // 2
-    gui = SelectionGUI(make_image_128x256(), subset_size=subset_size)
+    gui = SelectionGUIOld(make_image_128x256(), subset_size=subset_size)
     try:
         px, py = 128, 64
         entry = gui.add_selection('manual', geometry=[(px, py)])
@@ -258,7 +264,7 @@ def test_subset_border_path_traces_the_filled_area():
 
 def test_subset_borders_are_dropped_together_with_the_fill():
     """A subset whose rectangle runs off the image edge gets neither fill nor border."""
-    gui = SelectionGUI(make_image_128x256(), subset_size=15)
+    gui = SelectionGUIOld(make_image_128x256(), subset_size=15)
     try:
         entry = gui.add_selection('manual', geometry=[(128, 64), (2, 2)])
         gui.recompute_entry(entry, gui.get_subset_size(), gui.distance_spinbox.value())
@@ -287,7 +293,7 @@ def _sobel_shapes(gui, monkeypatch):
 
 def test_shi_tomasi_roi_shape_matches_subset_size_axes(monkeypatch):
     """The ROI sliced inside compute_candidate_points_shi_tomasi must be (2w+1, 2h+1)."""
-    gui = SelectionGUI(make_image_128x256(), subset_size=(5, 25))
+    gui = SelectionGUIOld(make_image_128x256(), subset_size=(5, 25))
     try:
         entry = gui.add_selection('manual', geometry=[(128, 64)])
         gui.recompute_entry(entry, gui.get_subset_size(), gui.distance_spinbox.value())
@@ -306,7 +312,7 @@ def test_shi_tomasi_roi_shape_matches_subset_size_axes(monkeypatch):
 
 def test_gradient_direction_roi_shape_matches_subset_size_axes(monkeypatch):
     """The ROI sliced inside compute_candidate_points_gradient_direction must be (2w+1, 2h+1)."""
-    gui = SelectionGUI(make_image_128x256(), subset_size=(5, 25))
+    gui = SelectionGUIOld(make_image_128x256(), subset_size=(5, 25))
     try:
         entry = gui.add_selection('manual', geometry=[(128, 64)])
         gui.recompute_entry(entry, gui.get_subset_size(), gui.distance_spinbox.value())
@@ -326,7 +332,7 @@ def test_gradient_direction_roi_shape_matches_subset_size_axes(monkeypatch):
 
 def test_square_subset_filter_roi_shape_unchanged(monkeypatch):
     """Regression: a square subset_size must still produce a square filter ROI."""
-    gui = SelectionGUI(make_image_128x256(), subset_size=15)
+    gui = SelectionGUIOld(make_image_128x256(), subset_size=15)
     try:
         entry = gui.add_selection('manual', geometry=[(128, 64)])
         gui.recompute_entry(entry, gui.get_subset_size(), gui.distance_spinbox.value())
@@ -358,7 +364,7 @@ def test_gradient_direction_dx_dy_convention_matches_real_axes():
     xs = np.arange(width)
     frame = np.tile(xs, (height, 1)).astype(np.uint8)  # frame[y, x] = x: varies only in x.
 
-    gui = SelectionGUI(frame, subset_size=15)
+    gui = SelectionGUIOld(frame, subset_size=15)
     try:
         entry = gui.add_selection('manual', geometry=[(50, 30)])
         gui.recompute_entry(entry, gui.get_subset_size(), gui.distance_spinbox.value())

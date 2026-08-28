@@ -217,7 +217,7 @@ def shi_tomasi(image, window):
 
     with ``a = sum(gx**2)``, ``c = sum(gy**2)``, ``b = sum(gx*gy)``. The sums are
     true sums over the window, not means, so the values are directly comparable
-    with the per-subset implementation in ``SelectionGUI``.
+    with the per-subset implementation in ``SelectionGUIOld``.
 
     :param image: 2-D image, indexed ``[row, col]``
     :type image: numpy.ndarray

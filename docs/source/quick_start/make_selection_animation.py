@@ -1,6 +1,6 @@
 """Generate ``selection.gif`` for the points-selection docs page.
 
-Produces an animated GIF of the PyQt6-based ``SelectionGUI``
+Produces an animated GIF of the PyQt6-based ``SelectionGUIOld``
 (``pyidi/GUIs/subset_selection.py``) building up a Grid selection on the
 ``data/data_synthetic.cih`` demo video: an empty frame, the polygon
 vertices of the selection region appearing one at a time, the subset
@@ -9,7 +9,7 @@ selection held for a few extra frames.
 
 Why the headless setup is needed
 ---------------------------------
-``SelectionGUI`` is a full Qt application (``QtWidgets.QMainWindow``)
+``SelectionGUIOld`` is a full Qt application (``QtWidgets.QMainWindow``)
 built for interactive use: its constructor calls ``self.show()`` and
 then starts the Qt event loop, ending with
 ``sys.exit(app.exec())`` whenever ``sys.ps1`` is not set (i.e. a plain
@@ -20,7 +20,7 @@ construct the window, poke at its state, and grab pixels from it:
 * ``QT_QPA_PLATFORM=offscreen`` must be set *before* Qt is imported, so
   Qt renders to its software framebuffer instead of trying to open a
   real display.
-* ``sys.ps1`` is set before constructing ``SelectionGUI``, so its
+* ``sys.ps1`` is set before constructing ``SelectionGUIOld``, so its
   constructor takes the "interactive" branch instead of
   ``sys.exit(...)``.
 * ``sys.ps1`` alone is not enough: the "interactive" branch still calls
@@ -47,7 +47,7 @@ import imageio.v3 as iio  # noqa: E402
 import numpy as np  # noqa: E402
 from PyQt6 import QtGui, QtWidgets  # noqa: E402
 
-from pyidi.GUIs.subset_selection import SelectionGUI  # noqa: E402
+from pyidi.GUIs.subset_selection import SelectionGUIOld  # noqa: E402
 from pyidi.video_reader import VideoReader  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -101,11 +101,11 @@ def downscale(frame, target_width):
 
 
 def main():
-    sys.ps1 = ">>> "  # Make SelectionGUI think it's running interactively.
+    sys.ps1 = ">>> "  # Make SelectionGUIOld think it's running interactively.
     QtWidgets.QApplication.exec = lambda self=None: 0  # Neutralise the blocking event loop.
 
     video = VideoReader(DATA_PATH)
-    window = SelectionGUI(video, subset_size=15, subset_overlap=3)
+    window = SelectionGUIOld(video, subset_size=15, subset_overlap=3)
     window.resize(1200, 800)
 
     frames = []

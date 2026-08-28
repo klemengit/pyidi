@@ -1,18 +1,43 @@
-.. _point-selection:
+.. _point-selection-old:
 
-Point selection UI
-==================
+Point selection UI (deprecated)
+===============================
 
-A convenient UI (``SelectionGUI``) is available to make the point selection easier.
+.. deprecated:: 1.4
 
-.. note::
+    This is the window ``SelectionGUI`` named in 1.3. It is now
+    ``SelectionGUIOld``, it is frozen, and it is removed in 1.5.
+    :doc:`feature_selection` documents the interface that ``SelectionGUI``
+    names today, and constructing this one prints a ``DeprecationWarning``.
 
-    ``SelectionGUI`` places the subsets and then filters them. If you would
-    rather score the whole image first and let the selection find the features
-    inside a region -- which is what you want on a random speckle pattern, where
-    a grid mostly misses the good locations -- see
-    :doc:`feature_selection`. Both interfaces are available and neither
-    replaces the other.
+    The replacement does everything described on this page. The constructor
+    signature is identical and ``get_points()`` returns the same ``(row, col)``
+    array, so a script that opens the window and reads its points only needs
+    the name changed -- or nothing at all, if it says ``SelectionGUI``.
+
+This page is kept for the 1.4 cycle, so that a script written against the old
+window can be read alongside the code it drives.
+
+What does not carry over
+------------------------
+
+- ``get_filtered_points()`` and ``get_selected_points()``. The replacement has
+  one ``get_points()``: filtering is no longer a second pass over an existing
+  selection, it *is* the selection.
+- The internal attributes -- ``selections``, ``subset_size_spinbox``,
+  ``candidate_points`` and the rest. Nothing in the replacement corresponds to
+  them.
+- ``Grid`` as a mode. Draw a polygon and set its row to the ``points`` role, or
+  keep it a mask and choose the ``lattice`` selector.
+
+Scores near the image border also differ slightly, because the replacement
+takes gradients over real neighbours instead of ones reflected at the subset
+edge. The new value is the correct one.
+
+Everything below describes ``SelectionGUIOld`` as it behaves today.
+
+Using it
+--------
 
 It is a PyQt6-based tool, so the ``[qt]`` extra must be installed first:
 
@@ -20,7 +45,7 @@ It is a PyQt6-based tool, so the ``[qt]`` extra must be installed first:
 
     pip install pyidi[qt]
 
-Without this extra, ``SelectionGUI`` can still be imported, but instantiating
+Without this extra, ``SelectionGUIOld`` can still be imported, but instantiating
 it raises a ``RuntimeError``.
 
 To use the UI, a ``VideoReader`` object must first be created (a plain
@@ -28,18 +53,18 @@ To use the UI, a ``VideoReader`` object must first be created (a plain
 
 .. code:: python
 
-    from pyidi import VideoReader, SimplifiedOpticalFlow, SelectionGUI
+    from pyidi import VideoReader, SimplifiedOpticalFlow, SelectionGUIOld
 
     video = VideoReader(input_file)
 
 where ``input_file`` can be a Photron ``.cih``/``.cihx`` path, an image, a
 video file, a numpy array, or a ``.SLOW`` file.
 
-A ``SelectionGUI`` window can then be opened:
+A ``SelectionGUIOld`` window can then be opened:
 
 .. code:: python
 
-    gui = SelectionGUI(video, subset_size=11, subset_overlap=0)
+    gui = SelectionGUIOld(video, subset_size=11, subset_overlap=0)
 
 The window is modal: the call blocks until you close it, and execution
 continues on the next line with the selection available on the object.
@@ -189,6 +214,6 @@ the extracted array:
     sof.set_points(gui)          # or: sof.set_points(points)
 
 .. image:: selection.gif
-    :alt: Animated demo of the SelectionGUI Grid method: a polygon is drawn
+    :alt: Animated demo of the SelectionGUIOld Grid method: a polygon is drawn
         vertex by vertex over the video frame, filling in with the subset
         grid it encloses.

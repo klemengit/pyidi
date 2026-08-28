@@ -12,13 +12,13 @@ other way does not work, and the numbers are worth recording, because "just keep
 every n-th of them" is the obvious thing to reach for. On a 1024x1024 frame with
 357k pixels above the threshold, thinned to twenty thousand points:
 
-  ==========================  =========  ===============
-  rule                        median gap  pairs under 3 px
-  ==========================  =========  ===============
-  every n-th, best first        2.0 px        78%
-  every n-th, in scan order     1.0 px        92%
-  separation                       >= n px        0%
-  ==========================  =========  ===============
+  =========================  ==========  ================
+  rule                       median gap  pairs under 3 px
+  =========================  ==========  ================
+  every n-th, best first     2.0 px      78%
+  every n-th, in scan order  1.0 px      92%
+  separation                 >= n px     0%
+  =========================  ==========  ================
 
 Keeping every n-th of a list ordered by score fails because consecutive ranks
 are neighbours on the same feature; keeping every n-th in scan order fails

@@ -9,6 +9,38 @@ changes see the :doc:`changelog`.
 From 1.4.0
 ----------
 
+``SelectionGUI`` now names a different window
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+``SelectionGUI`` is the interface built on :mod:`pyidi.selection`, documented
+in :doc:`quick_start/feature_selection`. The window it named in 1.3 is
+``SelectionGUIOld``: still importable, deprecated, removed in 1.5.
+
+Nothing changes for a script that opens the window and reads its points. The
+constructor takes the same arguments and ``get_points()`` returns the same
+``(n_points, 2)`` array in ``(row, col)`` order:
+
+.. code:: python
+
+    gui = SelectionGUI(video, subset_size=21, subset_overlap=0)
+    lk.set_points(gui)
+
+To stay on the old window for now, rename it and expect the warning:
+
+.. code:: python
+
+    from pyidi import SelectionGUIOld
+
+    gui = SelectionGUIOld(video, subset_size=21, subset_overlap=0)
+
+Three things do not carry over. ``get_filtered_points()`` and
+``get_selected_points()`` are gone -- there is one ``get_points()``, because
+filtering is no longer a pass over an existing selection but the selection
+itself. The internal attributes (``selections``, ``subset_size_spinbox``,
+``candidate_points``) have no counterpart. And ``Grid`` is not a mode: draw a
+polygon and set its row to the ``points`` role, or keep it a mask and pick the
+``lattice`` selector.
+
 ``SubsetSelection`` has been removed
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 

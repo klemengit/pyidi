@@ -1,6 +1,6 @@
 """Interactive front end for the mask -> evaluate -> select pipeline.
 
-``FeatureSelectionGUI`` drives :mod:`pyidi.selection`, whose three steps --
+``SelectionGUI`` drives :mod:`pyidi.selection`, whose three steps --
 mask, evaluate, select, in the vocabulary settled in issue #51 -- are presented
 as *two* tabs.
 
@@ -27,12 +27,14 @@ thing that pays for a recomputation.
 Coordinate convention: ``(row, col)`` everywhere, matching the pipeline and
 numpy. The image item is set to ``axisOrder='row-major'`` so pyqtgraph's view
 coordinates are ``x = column, y = row``, and the only conversion in the whole
-module is that swap at the mouse-event boundary. The older ``SelectionGUI``
-instead transposes the frame and carries ``(x, y)`` internally, which is where
-most of its axis-order bugs came from.
+module is that swap at the mouse-event boundary. ``SelectionGUIOld`` instead
+transposes the frame and carries ``(x, y)`` internally, which is where most of
+its axis-order bugs came from.
 
-This is a separate interface, not a replacement: ``SelectionGUI`` is untouched
-and keeps working.
+This is the interface ``SelectionGUI`` names as of 1.4. The window it replaced
+is still importable as :class:`~pyidi.SelectionGUIOld`, deprecated and frozen
+until 1.5 -- it offered the same five tools and the same two filters, one
+subset at a time.
 """
 
 import sys
@@ -212,7 +214,7 @@ class CanvasViewBox(pg.ViewBox):
     """The image view, with brush painting and vertex dragging layered on panning.
 
     :param parent_gui: the window this view belongs to
-    :type parent_gui: FeatureSelectionGUI
+    :type parent_gui: SelectionGUI
     """
 
     def __init__(self, parent_gui, *args, **kwargs):
@@ -269,7 +271,7 @@ class CanvasViewBox(pg.ViewBox):
 
         A direction is a thing you point at. Typing two components and checking
         the heatmap afterwards is a slower way of saying the same thing, so this
-        reproduces the drag the older ``SelectionGUI`` offered.
+        reproduces the drag ``SelectionGUIOld`` offered.
         """
         gui = self.parent_gui
         if not gui.drawing_direction:
@@ -345,11 +347,42 @@ class CanvasViewBox(pg.ViewBox):
         super().mouseDragEvent(ev, axis)
 
 
-class FeatureSelectionGUI(QtWidgets.QMainWindow):
+class SelectionGUI(QtWidgets.QMainWindow):
     """Pick tracking points by masking, scoring and selecting.
 
     The window is modal: the constructor blocks until it is closed, and the
     points are then available through :attr:`points` or :meth:`get_points`.
+
+    .. versionchanged:: 1.4
+        ``SelectionGUI`` now names this interface. The window it replaced is
+        :class:`~pyidi.SelectionGUIOld`, deprecated and removed in 1.5. The
+        constructor signature is unchanged and ``get_points()`` still returns
+        ``(row, col)``, so a script that only constructs the window and reads
+        its points needs no edit at all.
+
+    Everything the old window did is here, under different names. Its five
+    selection methods are the mask tools, a row's *role* deciding whether a
+    region bounds the search or *is* the answer:
+
+    ===================== ==============================================================
+    ``SelectionGUIOld``   here
+    ===================== ==============================================================
+    Grid                  Polygon tool with role ``points``, or the ``lattice`` selector
+    Manual                Points tool
+    Along the line        Line tool
+    Brush                 Brush tool
+    Remove point          Remove point tool
+    Shi-Tomasi filter     ``shi_tomasi`` evaluator
+    Gradient in direction ``gradient_direction`` evaluator
+    ===================== ==============================================================
+
+    The difference is what happens underneath. The old window placed subsets
+    and then scored the ones it had placed; this one scores every position in
+    the frame once, caches that, and re-derives the points from it. So the
+    threshold and separation follow a dragged slider, the evaluators are a
+    registry rather than two hard-coded branches (see
+    :func:`~pyidi.selection.register_evaluator`), and the whole pipeline runs
+    without Qt -- :mod:`pyidi.selection` is importable on its own.
 
     :param video: a ``VideoReader``, a 2-D ``(height, width)`` image, or a 3-D
         ``(n_frames, height, width)`` stack whose first frame is used

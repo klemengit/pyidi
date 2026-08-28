@@ -5,18 +5,62 @@ This changelog starts at version 1.4.0. For earlier versions see the
 
 ## Unreleased
 
+### `SelectionGUI` is now the automatic feature selection interface
+
+There is one point-selection window again. `SelectionGUI` names the interface
+built on `pyidi.selection`, described in the next section; the window it named
+in 1.3 is `SelectionGUIOld`, deprecated and removed in 1.5.
+
+Two windows offering the same five tools was never the plan — the new one was
+built alongside the old one so the old one would keep working while it was
+written. It turned out to be a superset rather than a companion: every
+selection method has a counterpart, and both filters are evaluators.
+
+| `SelectionGUIOld` | `SelectionGUI` |
+| --- | --- |
+| Grid | Polygon with role `points`, or the `lattice` selector |
+| Manual | Points tool |
+| Along the line | Line tool |
+| Brush | Brush tool |
+| Remove point | Remove point tool |
+| Shi-Tomasi filter | `shi_tomasi` evaluator |
+| Gradient in direction | `gradient_direction` evaluator |
+
+**Most scripts need no edit.** The constructor takes the same arguments and
+`get_points()` returns the same `(n_points, 2)` array in `(row, col)` order, so
+`SelectionGUI(video, subset_size=21)` followed by `set_points(gui)` keeps
+working and opens the better window.
+
+What does not carry over, for anything that reached deeper:
+
+- **`get_filtered_points()` and `get_selected_points()` are gone.** There is one
+  `get_points()`. Filtering is no longer a second pass over a selection that
+  already exists — it is the selection.
+- **The internal attributes have no counterpart** — `selections`,
+  `subset_size_spinbox`, `candidate_points` and the rest.
+- **`Grid` is not a mode.** Draw a polygon and set its row to the `points` role,
+  or keep it a mask and choose the `lattice` selector.
+- **Scores near the image border differ slightly**, because gradients are taken
+  over real neighbours instead of ones reflected at the subset edge. The new
+  value is the correct one.
+
+`SelectionGUIOld` prints a `DeprecationWarning` on construction and is otherwise
+unchanged. `FeatureSelectionGUI`, the working name used while this was being
+built, never appeared in a release; the name raises a `RuntimeError` saying
+where it went.
+
 ### Automatic feature selection
 
-New `FeatureSelectionGUI`, and the `pyidi.selection` package underneath it,
-add automatic feature selection: score the whole image, then pick the
-best-separated features inside the region you drew, rather than placing
-subsets on a grid and discarding the poor ones. On a random speckle pattern or
-an intricate structure this is the difference between sampling where the
-features are and sampling where the grid happens to fall. Implements the
-workflow discussed in [issue #51](https://github.com/ladisk/pyidi/issues/51),
-using the mask/evaluate/select vocabulary agreed there.
+The `pyidi.selection` package, and the interface over it, add automatic feature
+selection: score the whole image, then pick the best-separated features inside
+the region you drew, rather than placing subsets on a grid and discarding the
+poor ones. On a random speckle pattern or an intricate structure this is the
+difference between sampling where the features are and sampling where the grid
+happens to fall. Implements the workflow discussed in
+[issue #51](https://github.com/ladisk/pyidi/issues/51), using the
+mask/evaluate/select vocabulary agreed there.
 
-The blocker was never the idea, it was the cost. `SelectionGUI` scores one
+The blocker was never the idea, it was the cost. `SelectionGUIOld` scores one
 subset at a time — a Sobel and a 2x2 eigendecomposition per point — which is
 fine for a few hundred grid points and takes minutes at one megapixel, so the
 spacing control was really a compute budget. Shi-Tomasi is now computed as a
@@ -179,7 +223,7 @@ stay in step. Control groups are flat rather than nested, settings the current
 selector does not read are hidden rather than greyed out, and the descriptive
 paragraphs are tooltips -- between them they were most of a panel that was
 narrow enough to clip its own values. A direction
-can be dragged out on the image, as in `SelectionGUI`, as well as typed or
+can be dragged out on the image, as in `SelectionGUIOld`, as well as typed or
 taken from the `X`/`Y` presets, and a line shows the direction in force.
 Points under a deselect stroke are crossed out while the stroke is being
 painted, rather than only disappearing once the mouse comes up.
@@ -221,10 +265,10 @@ control. It is the one control that can make a redraw expensive, since a
 parameter not scored before is a whole-frame evaluation.
 
 **Scores differ slightly from the old per-subset filter near strong edges.**
-`SelectionGUI` ran Sobel on the isolated subset, so gradients at the subset
+`SelectionGUIOld` ran Sobel on the isolated subset, so gradients at the subset
 border used values reflected from inside it; the whole-image version sees the
 real neighbours. The new value is the correct one. This affects the new module
-only — `SelectionGUI` is untouched and behaves exactly as before.
+only — `SelectionGUIOld` is untouched and behaves exactly as before.
 
 ### Example datasets
 
@@ -363,12 +407,12 @@ converge. The error is now returned as its absolute value.
   `LucasKanade` again.** The 1.4.0 numba rewrite renamed them to
   `compute_inverse` and `compute_delta`; code importing the 1.3.3 names broke
   as soon as it hit that import. Both old names are restored as aliases.
-- **Removed points in `SelectionGUI` no longer reappear after a recompute.**
+- **Removed points in `SelectionGUIOld` no longer reappear after a recompute.**
   The `Remove point` tool used to delete from a selection's *derived* points,
   which were regenerated from the source geometry whenever the subset size or
   spacing changed, so a removed point could silently come back. Removals are
   now recorded per selection and re-applied after every recompute.
-- **`SelectionGUI`'s brush had its row/column spacing swapped for anisotropic
+- **`SelectionGUIOld`'s brush had its row/column spacing swapped for anisotropic
   subsets.** For a non-square `subset_size=(height, width)`, the brush laid
   its grid out with the axes transposed — columns stepped by the height and
   rows stepped by the width. Square subsets were unaffected. Now fixed.
@@ -384,7 +428,10 @@ converge. The error is now returned as its absolute value.
   running in a single process; the progress bar was always shown.
   `DirectionalLucasKanade` already honoured the setting.
 
-### Point selection consolidated on `SelectionGUI`
+### Point selection consolidated on one window
+
+> The window these entries describe is the one now called `SelectionGUIOld`.
+> See "`SelectionGUI` is now the automatic feature selection interface" above.
 
 pyidi had accumulated five separate point-selection implementations. Three were
 dead code, one was documented but no longer developed, and the one under active
@@ -396,11 +443,11 @@ development was not reachable from the documented workflow. There is now one.
   replacement, so existing scripts fail with an actionable message rather than an
   `ImportError`. Replace `SubsetSelection(video, roi_size=(21, 21), noverlap=0)`
   with `SelectionGUI(video, subset_size=21, subset_overlap=0)`.
-- **`SelectionGUI` is now the documented interface.** It offers five selection
-  methods (grid in a polygon, manual points, along a polyline, brush, and
-  remove-point) plus automatic filtering by Shi-Tomasi corner strength or
-  gradient direction. It requires the Qt extras: `pip install pyidi[qt]`.
-- **Note for `LucasKanade` users:** `SelectionGUI` can select anisotropic
+- **It became the documented interface.** Five selection methods (grid in a
+  polygon, manual points, along a polyline, brush, and remove-point) plus
+  automatic filtering by Shi-Tomasi corner strength or gradient direction. It
+  requires the Qt extras: `pip install pyidi[qt]`.
+- **Note for `LucasKanade` users:** it can select anisotropic
   subsets again. `subset_size` accepts a scalar or a `(height, width)` pair,
   in the same `(vertical, horizontal)` convention as
   `LucasKanade.configure(roi_size=...)`. In the UI, a `Square subsets`
@@ -432,7 +479,7 @@ development was not reachable from the documented workflow. There is now one.
 - The napari `GUI` now routes its selections through `set_points()` as well, so
   points picked in the UI get the same checks as programmatic ones.
 
-### `SelectionGUI` editing
+### `SelectionGUIOld` editing
 
 - **The four separate selection stores are now one ordered list.** Grids,
   lines, brush strokes, and manually-clicked points all live in a single
@@ -509,10 +556,11 @@ development was not reachable from the documented workflow. There is now one.
 ### Other
 
 - New `pyidi/selection_geometry.py` holds the ROI-grid geometry as pure numpy,
-  with no GUI-toolkit dependency, shared by the napari `GUI` and `SelectionGUI`.
+  with no GUI-toolkit dependency, shared by the napari `GUI` and the selection
+  windows.
   Its functions do not share one coordinate convention - each docstring states
   which one it uses, and the tests pin the difference deliberately.
-- `SelectionGUI` accepts a numpy array as documented. A 2-D or 3-D array
+- `SelectionGUIOld` accepts a numpy array as documented. A 2-D or 3-D array
   previously raised `AttributeError` because the frame was only set for a
   `VideoReader`; anything unusable now raises `TypeError`.
 - First tests for the GUI package: `tests/test_selection_geometry.py` and

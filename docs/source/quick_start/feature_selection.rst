@@ -1,20 +1,28 @@
+.. _point-selection:
 .. _feature-selection:
 
-Automatic feature selection
-===========================
+Point selection
+===============
 
-``FeatureSelectionGUI`` finds the points for you. Instead of placing subsets on
-a grid and then discarding the poor ones, it scores *every* pixel of the image
-and picks the best-separated maxima inside the region you drew. On a random
-speckle pattern or an intricate structure that is the difference between
-sampling where the features happen to be and sampling where the grid happens to
-fall.
+``SelectionGUI`` finds the points for you. Instead of placing subsets on a grid
+and then discarding the poor ones, it scores *every* pixel of the image and
+picks the best-separated maxima inside the region you drew. On a random speckle
+pattern or an intricate structure that is the difference between sampling where
+the features happen to be and sampling where the grid happens to fall.
 
-It is a separate interface from :doc:`points_selection`, not a replacement.
-``SelectionGUI`` is unchanged and still the right tool when you want to place
-subsets yourself.
+Placing the subsets yourself is not a separate mode: draw a region and set its
+row to the ``points`` role and it lays them out on a grid without scoring
+anything, alongside regions that *are* scored. See `Mask`_.
 
-Both need the ``[qt]`` extra:
+.. versionchanged:: 1.4
+
+    ``SelectionGUI`` names this window as of 1.4. The one it replaced is
+    :doc:`SelectionGUIOld <points_selection>`, deprecated and removed in 1.5.
+    It takes the same arguments and returns the same ``(row, col)`` array, so a
+    script that opens the window and reads its points needs no edit; that page
+    lists what does not carry over.
+
+It needs the ``[qt]`` extra:
 
 .. code:: bash
 
@@ -54,16 +62,27 @@ dragging a threshold updates while you are still moving the control.
 
 .. code:: python
 
-    from pyidi import VideoReader, FeatureSelectionGUI
+    from pyidi import VideoReader, SelectionGUI
 
     video = VideoReader(input_file)
-    gui = FeatureSelectionGUI(video, subset_size=11)
+    gui = SelectionGUI(video, subset_size=11)
 
     points = gui.points          # or: gui.get_points()
 
 The window is modal: the call blocks until you close it. ``points`` is an
 ``(n_points, 2)`` integer array in **row/column** order, ready for
 ``set_points``.
+
+.. image:: feature_selection.gif
+    :alt: The selection window opening with points already spread over the whole
+        frame, a polygon then drawn corner by corner so the points outside it drop
+        away, and finally the separation swept to show it deciding how many points
+        there are.
+    :width: 700
+
+The order in the animation is the one the interface is built around: the frame
+is scored first and there are points on it before anything is drawn, the region
+trims them, and the separation sets how many survive.
 
 Mask
 ----
@@ -181,7 +200,7 @@ Below the evaluator, on the same tab:
   point, which is a different thing; hand-placed points are never decimated.
 
 Why decimation is not the density control
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 The obvious way to thin a dense selection is to keep every n-th of the pixels
 above the threshold, and it does not work. Measured on a 1024×1024 frame with

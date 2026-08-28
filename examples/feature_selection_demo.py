@@ -3,13 +3,13 @@
 Run this CELL BY CELL in an interactive session (molten.nvim, IPython, VS Code),
 not with ``python examples/feature_selection_demo.py``.
 
-Why: ``FeatureSelectionGUI.__init__`` ends with ``sys.exit(app.exec())`` whenever
+Why: ``SelectionGUI.__init__`` ends with ``sys.exit(app.exec())`` whenever
 ``sys.ps1`` is absent, which is the case for a plain script run. The window would
 open, and closing it would terminate the interpreter before any of the checks
 below could run. In an interactive session it calls a bare ``app.exec()`` instead,
 which blocks until you close the window and then hands control back.
 
-Either way the GUI is modal: execution stops at the ``FeatureSelectionGUI(...)``
+Either way the GUI is modal: execution stops at the ``SelectionGUI(...)``
 line until you close the window.
 
 Requires the Qt extras:  pip install pyidi[qt]
@@ -33,9 +33,10 @@ print(f'{video.N} frames, {video.image_height} x {video.image_width} (height x w
 # ---------------------------------------------------------------------------
 # 1. Find, then trim.
 #
-# This is a DIFFERENT interface from SelectionGUI, not a replacement. The old
-# one places subsets and then filters them; this one scores the whole image and
-# lets the selection find the features, which you then trim.
+# This is what SelectionGUI names as of 1.4. The window it replaced -- now
+# SelectionGUIOld, deprecated -- placed subsets and then filtered them; this one
+# scores the whole image and lets the selection find the features, which you
+# then trim.
 #
 # The window OPENS WITH POINTS ALREADY ON IT. The selections list starts with a
 # 'Whole image' mask row, so the candidates are there to look at before you have
@@ -114,7 +115,7 @@ print(f'{video.N} frames, {video.image_height} x {video.image_width} (height x w
 # CLOSE THE WINDOW to continue.
 # ---------------------------------------------------------------------------
 
-gui = pyidi.FeatureSelectionGUI(video, subset_size=11)
+gui = pyidi.SelectionGUI(video, subset_size=11)
 
 # %%
 
@@ -239,4 +240,4 @@ print(f'{len(variance_points)} points from the new evaluator')
 # %%
 # Open the GUI again - 'Local variance' should now be in the evaluator menu.
 
-gui2 = pyidi.FeatureSelectionGUI(video, subset_size=11)
+gui2 = pyidi.SelectionGUI(video, subset_size=11)

@@ -76,7 +76,7 @@ def speckle():
 
 
 def reference_shi_tomasi(image, row, col, half):
-    """Score one subset the slow way, as ``SelectionGUI`` does it.
+    """Score one subset the slow way, as ``SelectionGUIOld`` does it.
 
     Gradients are taken over the whole image rather than over the isolated ROI:
     that is the one intentional difference between the old implementation and
