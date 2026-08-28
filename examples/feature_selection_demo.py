@@ -72,13 +72,14 @@ print(f'{video.N} frames, {video.image_height} x {video.image_width} (height x w
 #     to the Mask tab. The subset size is, because both tabs read it.
 #
 # --- MASK ------------------------------------------------------------------
-#   Polygon       - click corners; the enclosed AREA becomes a mask
-#   Brush         - hold Ctrl and drag to paint an area
-#   Line          - click vertices; points spaced along the segments
-#   Points        - click to drop individual points
-#   Remove point  - click near a point to delete it
+#   Polygon         - click corners; the enclosed AREA becomes a mask
+#   Brush           - hold Ctrl and drag to paint an area
+#   Line            - click vertices; points spaced along the segments
+#   Points          - click to drop individual points
+#   Remove point    - click near a point to delete it
+#   Remove w/ brush - hold Ctrl and drag to take away what the stroke covers
 #
-#   * TRIM THE 'Whole image' ROW. Toggle 'Deselect painted area' and paint over
+#   * TRIM THE 'Whole image' ROW. Pick 'Remove w/ brush' and paint over
 #     the parts you do not want. That is the workflow this ordering exists for:
 #     find the candidates, then edit them.
 #   * OR DELETE IT and draw your own region. Deleting it selects NOTHING - it

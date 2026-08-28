@@ -86,17 +86,24 @@ WHOLE_IMAGE_LABEL = 'Whole image'
 REDRAW_BUDGET_MS = 12.0
 
 #: Region tools available in the mask step, as ``(button label, entry kind)``.
-#: ``remove`` is not an entry kind -- it deletes points rather than making any.
+#: ``remove`` and ``erase`` are not entry kinds -- they take away rather than
+#: making anything, and are the last pair so the two of them read as a group.
 TOOLS = (
     ('Polygon', 'polygon'),
     ('Brush', 'brush'),
     ('Line', 'polyline'),
     ('Points', 'points'),
     ('Remove point', 'remove'),
+    ('Remove w/ brush', 'erase'),
 )
 
 #: Kinds whose geometry is a list of draggable vertices.
 VERTEX_KINDS = ('polygon', 'polyline')
+
+#: Tools that paint. Both lay a stroke down the same way and share the radius;
+#: they differ only in what the finished stroke does, which is why the erase
+#: tool is a tool rather than a mode the brush can be in.
+BRUSH_TOOLS = ('brush', 'erase')
 
 #: Threshold rules offered, as ``(menu label, mode, slider decades or None)``.
 #:
@@ -308,7 +315,7 @@ class CanvasViewBox(pg.ViewBox):
         abandoning it half-painted.
         """
         gui = self.parent_gui
-        if not (gui.step == STEP_MASK and gui.tool == 'brush'
+        if not (gui.step == STEP_MASK and gui.tool in BRUSH_TOOLS
                 and (self._ctrl(ev) or gui.painting)):
             return False
         ev.accept()
@@ -323,7 +330,7 @@ class CanvasViewBox(pg.ViewBox):
 
     def mouseClickEvent(self, ev):
         gui = self.parent_gui
-        if gui.step == STEP_MASK and gui.tool == 'brush':
+        if gui.step == STEP_MASK and gui.tool in BRUSH_TOOLS:
             if self._ctrl(ev):
                 ev.accept()
                 gui.brush_start()
@@ -413,7 +420,6 @@ class SelectionGUI(QtWidgets.QMainWindow):
         self.step = STEP_FIND
         self.tool = 'polygon'
         self._whole_image = None
-        self.deselect_mode = False
         self.drawing_direction = False
         self.direction_spins = []
         self.direction_button = None
@@ -616,28 +622,18 @@ class SelectionGUI(QtWidgets.QMainWindow):
         self.new_entry_button.clicked.connect(self.start_new_entry)
         layout.addWidget(self.new_entry_button)
 
-        self.brush_group = QtWidgets.QGroupBox('Brush (hold Ctrl and drag to paint)')
-        brush = self.brush_group
-        brush_column = QtWidgets.QVBoxLayout(brush)
         self.brush_radius = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
         self.brush_radius.setRange(1, 100)
         self.brush_radius.setValue(12)
-        self.brush_radius.setToolTip('Brush radius, in pixels.')
-        radius = self._form()
-        radius.addRow('Radius', self.brush_radius)
-        brush_column.addLayout(radius)
-        self.deselect_button = QtWidgets.QPushButton('Deselect painted area')
-        self.deselect_button.setCheckable(True)
-        self.deselect_button.setToolTip(
-            'Paint to subtract instead of adding. It takes away only the part you '
-            'paint over, and the points about to go are crossed out while you paint.')
-        self.deselect_button.toggled.connect(self._set_deselect_mode)
-        brush_column.addWidget(self.deselect_button)
-        layout.addWidget(brush)
-        # Painting is gated on the brush being the active tool (see
-        # ``_handle_brush_drag``), so with any other tool these two controls do
-        # nothing at all.
-        brush.setVisible(self.tool == 'brush')
+        self.brush_radius.setToolTip(
+            'Radius of the painted dab, in pixels. Shared by both brush tools, so '
+            'a stroke erases exactly as wide as it paints.')
+        self.brush_form = self._form()
+        self.brush_form.addRow('Brush radius', self.brush_radius)
+        layout.addLayout(self.brush_form)
+        # Painting is gated on a brush tool being active (see
+        # ``_handle_brush_drag``), so with any other tool this does nothing.
+        self._update_brush_row()
 
         self.spacing_spin = QtWidgets.QSpinBox()
         self.spacing_spin.setRange(-500, 500)
@@ -952,7 +948,7 @@ class SelectionGUI(QtWidgets.QMainWindow):
         """
         self.tool = kind
         self.tool_buttons[kind].setChecked(True)
-        self.brush_group.setVisible(kind == 'brush')
+        self._update_brush_row()
         self.new_entry_button.setEnabled(kind in VERTEX_KINDS)
         if kind in VERTEX_KINDS:
             self.new_entry_button.setText(f'Start new {"polygon" if kind == "polygon" else "line"}')
@@ -962,6 +958,8 @@ class SelectionGUI(QtWidgets.QMainWindow):
             'polyline': 'Click to place line vertices. Points are spaced along the segments.',
             'points': 'Click to place individual points. They bypass scoring.',
             'remove': 'Click near a point to remove it.',
+            'erase': 'Hold Ctrl and drag to take away the area you paint over. '
+                     'Points about to go are crossed out while you paint.',
         }[kind])
 
     def start_new_entry(self):
@@ -1239,8 +1237,24 @@ class SelectionGUI(QtWidgets.QMainWindow):
         self.draw_brush()
         self.refresh()
 
-    def _set_deselect_mode(self, enabled):
-        self.deselect_mode = enabled
+    @property
+    def deselect_mode(self):
+        """Whether a finished stroke subtracts rather than adds.
+
+        Derived from the tool rather than stored, so there is no way for the
+        two to disagree. It used to be a checkable button inside the brush
+        controls, which made painting a mode within a mode: the same button
+        could add or take away depending on a toggle several rows below it.
+        ``Remove w/ brush`` is now a tool of its own, next to ``Remove point`` --
+        the two things that take away, side by side.
+
+        :rtype: bool
+        """
+        return self.tool == 'erase'
+
+    def _update_brush_row(self):
+        """Show the radius only while a tool that paints is active."""
+        self.brush_form.setRowVisible(self.brush_radius, self.tool in BRUSH_TOOLS)
 
     # -- undo --------------------------------------------------------------
 

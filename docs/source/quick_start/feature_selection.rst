@@ -88,7 +88,7 @@ Mask
 ----
 
 The ``Whole image`` row that the window starts with is an ordinary row: uncheck
-it, paint it away with the deselect brush, or delete it. Deleting it selects
+it, paint it away with ``Remove w/ brush``, or delete it. Deleting it selects
 nothing — it does not silently revert to the whole frame.
 
 Mask rows combine as a **union**, so drawing a region while the whole frame is
@@ -99,11 +99,10 @@ to bring the whole frame back, or press Ctrl+Z.
 ``Clear all`` starts over, which means the state the window opens in: every
 selection dropped and the ``Whole image`` row seeded again. It is undoable.
 
-Five tools, on the right:
+Six tools, on the right. The first four add, the last two take away:
 
 - **Polygon** — click to place corners; the enclosed area becomes a mask.
-- **Brush** — hold Ctrl and drag to paint an area. ``Deselect painted area``
-  switches the brush to erasing, which subtracts only the part you paint over.
+- **Brush** — hold Ctrl and drag to paint an area.
 - **Line** — click to place vertices; points are spaced along the segments.
 - **Points** — click to place individual points.
 - **Remove point** — click near a point to remove it. A hand-placed point is
@@ -112,6 +111,16 @@ Five tools, on the right:
   selection runs — so removing one takes the ground it stands on out of the
   mask: the disc it was reserving, its separation, so that nothing lands in its
   place.
+- **Remove w/ brush** — hold Ctrl and drag to take away everything the stroke
+  covers. It is the brush in reverse and shares its radius, so a stroke erases
+  exactly as wide as it paints, and it subtracts only the part you actually
+  paint over: a region keeps whatever the stroke missed, and disappears only
+  once nothing of it is left.
+
+``Remove point`` and ``Remove w/ brush`` are the same idea at two scales,
+which is why they sit together. Erasing used to be a toggle inside the brush
+controls, so the same tool added or subtracted depending on a button several
+rows below it; now the tool *is* the answer to which one it does.
 
 Points under a deselect stroke are crossed out while you paint, so you can see
 what the stroke is about to take before you let go. Nothing else moves until

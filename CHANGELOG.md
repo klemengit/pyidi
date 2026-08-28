@@ -49,6 +49,30 @@ unchanged. `FeatureSelectionGUI`, the working name used while this was being
 built, never appeared in a release; the name raises a `RuntimeError` saying
 where it went.
 
+### Erasing is a tool, not a mode the brush is in
+
+`Remove w/ brush` joins the mask tools, next to `Remove point`. It replaces the
+`Deselect painted area` toggle that used to sit inside the brush controls,
+which made painting a mode within a mode: the same brush added or subtracted
+depending on a checkable button several rows below it, and which one it was
+about to do was not visible where the work happened.
+
+The two tools that take away are now side by side, at the two scales they
+work at -- one point, or everything a stroke covers. `Remove w/ brush` is the
+brush in reverse and shares its radius, so a stroke erases exactly as wide as
+it paints. What it does is unchanged: it subtracts only the part actually
+painted over, a region keeps whatever the stroke missed, and it disappears
+only once nothing of it is left.
+
+Two controls on that tab also stop being shown when nothing can act on them.
+`Brush radius` appears for the tools that paint, and `Point spacing` for a row
+that lays points out along or inside its shape -- a polygon, line or brush
+stroke in the `points` role. Neither is read otherwise: a `mask` row has its
+points chosen by the selection, so their distance is the separation on the
+other tab, and a `points`-tool row is the coordinates that were clicked. This
+follows what the selector's own settings already did, appearing and
+disappearing with the selector rather than greying out.
+
 ### Automatic feature selection
 
 The `pyidi.selection` package, and the interface over it, add automatic feature

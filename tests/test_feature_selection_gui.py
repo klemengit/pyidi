@@ -235,7 +235,7 @@ def test_the_seeded_row_can_be_trimmed_with_the_deselect_brush():
         before = gui.pipeline.mask.sum()
         gui.select_step(STEP_MASK)
         gui.select_tool('brush')
-        gui.deselect_button.setChecked(True)
+        gui.select_tool('erase')
         gui.brush_start()
         gui.brush_move((80, 120))
         gui.brush_end()
@@ -490,7 +490,7 @@ def test_undo_reverses_a_deselection():
         painted = gui.pipeline.mask.sum()
         assert painted > 0
 
-        gui.deselect_button.setChecked(True)
+        gui.select_tool('erase')
         gui.brush_start()
         gui.brush_move((80, 120))
         gui.brush_end()
@@ -905,7 +905,7 @@ def test_a_deselect_stroke_crosses_out_the_points_it_covers():
     try:
         gui.select_step(STEP_MASK)
         gui.select_tool('brush')
-        gui.deselect_button.setChecked(True)
+        gui.select_tool('erase')
 
         gui.brush_start()
         gui.brush_radius.setValue(40)
@@ -930,7 +930,7 @@ def test_painting_a_stroke_leaves_the_point_cloud_alone():
     try:
         gui.select_step(STEP_MASK)
         gui.select_tool('brush')
-        gui.deselect_button.setChecked(True)
+        gui.select_tool('erase')
         before = gui.point_scatter.getData()[0].copy()
 
         gui.brush_start()
@@ -963,7 +963,7 @@ def test_the_crossed_out_points_are_gone_once_the_stroke_lands():
     try:
         gui.select_step(STEP_MASK)
         gui.select_tool('brush')
-        gui.deselect_button.setChecked(True)
+        gui.select_tool('erase')
         before = len(gui.get_points())
 
         gui.brush_start()
@@ -1402,7 +1402,7 @@ def test_every_setting_explains_itself():
                        gui.separation_spin, gui.pitch_spin, gui.max_points_spin,
                        gui.decimation_spin, gui.spacing_spin, gui.height_spin,
                        gui.width_spin, gui.show_subsets, gui.show_score,
-                       gui.role_button, gui.deselect_button, gui.brush_radius):
+                       gui.role_button, gui.brush_radius):
             assert widget.toolTip(), widget
     finally:
         gui.close()
@@ -1419,6 +1419,9 @@ def test_no_tooltip_or_hint_uses_a_name_the_interface_dropped():
             assert 'minimum distance' not in lowered
             assert 'fraction of the maximum' not in lowered
             assert 'find points' not in lowered
+            # 'Deselect painted area' was the checkable button that 'Remove
+            # area' replaced; nothing should still send anyone looking for it.
+            assert 'deselect painted area' not in lowered
     finally:
         gui.close()
 
@@ -1562,7 +1565,7 @@ def test_an_off_frame_point_cannot_reach_the_result():
         gui.refresh()
         assert [tuple(p) for p in gui.get_points()] == [(80, 120)]
 
-        gui.deselect_button.setChecked(True)
+        gui.select_tool('erase')
         gui.brush_start()
         gui.brush_move((80.0, 120.0))       # would index row 999 of a 160-row frame
         gui.brush_end()
@@ -1696,7 +1699,7 @@ def test_an_undo_snapshot_does_not_copy_the_erased_arrays():
     gui = gui_with_region()
     try:
         gui.select_tool('brush')
-        gui.deselect_button.setChecked(True)
+        gui.select_tool('erase')
         gui.brush_start()
         gui.brush_move((80.0, 120.0))
         gui.brush_end()
@@ -1725,22 +1728,45 @@ def test_the_seeded_row_is_recognised_by_identity_not_by_its_label():
 # The mask tab shows only what the current tool and rows can act on
 # ---------------------------------------------------------------------------
 
-def test_the_brush_controls_follow_the_brush_tool():
-    """Painting is gated on the tool, so with any other one these do nothing."""
+def test_the_brush_radius_follows_the_tools_that_paint():
+    """Painting is gated on the tool, so with any other one the radius does nothing."""
     gui = make_gui()
     try:
         gui.select_step(STEP_MASK)
 
         gui.select_tool('polygon')
-        assert not gui.brush_group.isVisible()
+        assert not gui.brush_radius.isVisible()
 
         gui.select_tool('brush')
-        assert gui.brush_group.isVisible()
         assert gui.brush_radius.isVisible()
-        assert gui.deselect_button.isVisible()
+
+        # Both brush tools share it: a stroke erases as wide as it paints.
+        gui.select_tool('erase')
+        assert gui.brush_radius.isVisible()
 
         gui.select_tool('points')
-        assert not gui.brush_group.isVisible()
+        assert not gui.brush_radius.isVisible()
+    finally:
+        gui.close()
+
+
+def test_erasing_is_a_tool_rather_than_a_mode_the_brush_is_in():
+    """The two things that take away are tools; neither hides inside the other."""
+    gui = make_gui()
+    try:
+        gui.select_step(STEP_MASK)
+        assert 'erase' in gui.tool_buttons
+        assert 'remove' in gui.tool_buttons
+
+        gui.select_tool('brush')
+        assert not gui.deselect_mode
+
+        gui.select_tool('erase')
+        assert gui.deselect_mode
+
+        # Leaving the tool leaves the mode, because they are the same thing.
+        gui.select_tool('brush')
+        assert not gui.deselect_mode
     finally:
         gui.close()
 
