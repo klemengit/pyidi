@@ -76,6 +76,24 @@ STEP_HINTS = {
                'The selected row\'s points are ringed.',
 }
 
+#: How a checked tab or tool is marked, applied to the step toolbar and the
+#: region-tool grid.
+#:
+#: Qt's default themes separate a checked ``QPushButton`` from an unchecked one
+#: by a shade or two, which is not a difference you can find across a panel --
+#: and this interface asks the question twice, once for which tab you are on and
+#: once for which tool is active. Only the checked state is styled, so unchecked
+#: buttons stay whatever the platform theme makes them and the window does not
+#: have to carry a theme of its own to have a legible one. Bold as well as
+#: coloured, so the cue does not rest on colour alone.
+CHECKED_BUTTON_STYLE = """
+QPushButton:checked {
+    background-color: #0078d7;
+    color: white;
+    font-weight: bold;
+}
+"""
+
 #: Label of the mask row seeded on startup, covering the whole frame.
 WHOLE_IMAGE_LABEL = 'Whole image'
 
@@ -499,6 +517,7 @@ class SelectionGUI(QtWidgets.QMainWindow):
             button.clicked.connect(lambda _, n=name: self.select_step(n))
             self.step_buttons[name] = button
         row.addStretch(1)
+        bar.setStyleSheet(CHECKED_BUTTON_STYLE)
         bar.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
         return bar
 
@@ -613,6 +632,7 @@ class SelectionGUI(QtWidgets.QMainWindow):
             button.clicked.connect(lambda _, k=kind: self.select_tool(k))
             self.tool_buttons[kind] = button
         self.tool_buttons['polygon'].setChecked(True)
+        tools.setStyleSheet(CHECKED_BUTTON_STYLE)
         layout.addWidget(tools)
 
         self.new_entry_button = QtWidgets.QPushButton('Start new polygon')

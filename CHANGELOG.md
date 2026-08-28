@@ -49,6 +49,20 @@ unchanged. `FeatureSelectionGUI`, the working name used while this was being
 built, never appeared in a release; the name raises a `RuntimeError` saying
 where it went.
 
+### The active tab and tool are visible
+
+Both groups of buttons -- the two tabs across the top, and the region tools --
+were left to the platform theme to mark, and a default theme separates a
+checked `QPushButton` from an unchecked one by a shade or two. That is not a
+difference you can find across a panel, and this interface asks the question
+twice: which tab am I on, and which tool is active. A checked button is now
+filled and bold, in the blue the selections list already highlights with.
+
+Only the checked state is styled. Everything else stays whatever the platform
+theme makes it, so the window does not have to carry a theme of its own to have
+a legible one -- which is what the older window did, and why it looks dated on
+a modern desktop.
+
 ### Erasing is a tool, not a mode the brush is in
 
 `Remove w/ brush` joins the mask tools, next to `Remove point`. It replaces the

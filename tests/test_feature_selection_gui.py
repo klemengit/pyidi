@@ -155,6 +155,36 @@ def test_the_tabs_are_not_numbered():
         gui.close()
 
 
+def test_exactly_one_tab_reads_as_active():
+    gui = make_gui()
+    try:
+        for step in (STEP_FIND, STEP_MASK, STEP_FIND):
+            gui.select_step(step)
+            checked = [name for name, b in gui.step_buttons.items() if b.isChecked()]
+            assert checked == [step]
+    finally:
+        gui.close()
+
+
+def test_the_checked_tab_and_tool_are_styled_not_left_to_the_theme():
+    """A default theme separates checked from unchecked by a shade or two.
+
+    Which is not a difference you can find across a panel, and this interface
+    asks the question twice -- which tab, and which tool.
+    """
+    gui = make_gui()
+    try:
+        toolbar = gui.step_buttons[STEP_FIND].parent()
+        tools = gui.tool_buttons['polygon'].parent()
+        for widget in (toolbar, tools):
+            assert ':checked' in widget.styleSheet()
+            # Only the checked state, so unchecked buttons stay native and the
+            # window does not have to carry a theme of its own.
+            assert 'QPushButton {' not in widget.styleSheet()
+    finally:
+        gui.close()
+
+
 def test_evaluate_and_select_share_one_panel():
     gui = make_gui()
     try:
