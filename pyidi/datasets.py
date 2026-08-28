@@ -10,11 +10,39 @@ Example::
 
     import pyidi
 
-    video = pyidi.datasets.load_music_box()   # downloads on first call
+    pyidi.datasets.list_datasets()                # what is available
+    video = pyidi.datasets.load_dataset('music_box')   # downloads on first call
+    video = pyidi.datasets.load_music_box()            # the same, by name
     lk = pyidi.LucasKanade(video)
 
 The cache directory is ``~/.pyidi/datasets`` and can be redirected with the
 ``PYIDI_DATA_DIR`` environment variable or the ``data_dir`` argument.
+
+Adding a dataset
+----------------
+
+A dataset is a dictionary of metadata in the :data:`DATASETS` registry; no code
+is needed to add one. :func:`register_dataset` accepts one from anywhere, so a
+recording that is not part of pyidi can be loaded through the same functions::
+
+    pyidi.datasets.register_dataset({
+        'name': 'my_recording',
+        'record': '1234567',            # Zenodo record id
+        'header_file': 'my_recording.cihx',
+        'data_file': 'my_recording.mraw',
+        'header_md5': '...',
+        'n_frames_total': 5000,
+        'image_height': 512,
+        'image_width': 512,
+        'bytes_per_pixel': 2,
+    })
+    video = pyidi.datasets.load_dataset('my_recording')
+
+The download strategy assumes what every dataset published this way has in
+common: a Zenodo record holding a Photron ``cihx`` header next to an
+uncompressed ``mraw`` file of fixed-size frames. Frames are addressed by byte
+offset, which is what makes fetching a window of a 36 GiB recording possible,
+and the header is rewritten to describe the downloaded window.
 
 @author: Janko Slavič (janko.slavic@fs.uni-lj.si)
 """
@@ -28,13 +56,31 @@ from tqdm import tqdm
 
 from .video_reader import VideoReader
 
-__all__ = ["load_music_box", "fetch_music_box", "get_data_dir", "MUSIC_BOX"]
+__all__ = [
+    "load_dataset", "fetch_dataset", "list_datasets", "register_dataset",
+    "load_music_box", "fetch_music_box", "get_data_dir",
+    "DATASETS", "MUSIC_BOX", "REQUIRED_KEYS",
+]
 
+#: Keys every dataset in the registry must define. The remaining keys
+#: (``doi``, ``url``, ``data_md5``, ``fps``, ``license``, ``citation``,
+#: ``description``, ``default_first_frame``, ``default_n_frames``) are optional.
+REQUIRED_KEYS = (
+    "name", "record", "header_file", "data_file", "header_md5",
+    "n_frames_total", "image_height", "image_width", "bytes_per_pixel",
+)
+
+#: The registered datasets, by name. See :func:`register_dataset`.
+DATASETS = {}
 
 #: Metadata of the music-box recording published at
 #: https://doi.org/10.5281/zenodo.22105821.
 MUSIC_BOX = {
     "name": "music_box",
+    "description": (
+        "Vibrating comb of a mechanical music box, Photron FASTCAM SA-Z, "
+        "7500 fps, 640x552 px, 12-bit."
+    ),
     "doi": "10.5281/zenodo.22105821",
     "record": "22105821",
     "url": "https://doi.org/10.5281/zenodo.22105821",
@@ -42,7 +88,9 @@ MUSIC_BOX = {
     "data_file": "music_box_excerpt.mraw",
     "header_md5": "d31811b6c95d5c0191de73668149c4a1",
     "data_md5": "08e3c3007e6b880bf63254d6ccc4b81a",
-    "n_frames": 3000,          # frames in the published excerpt
+    "n_frames_total": 3000,    # frames in the published excerpt
+    "default_first_frame": 400,  # after the pluck, where both teeth ring freely
+    "default_n_frames": 600,
     "image_height": 552,
     "image_width": 640,
     "bytes_per_pixel": 2,      # 16-bit container, 12 effective bits
@@ -58,6 +106,47 @@ MUSIC_BOX = {
 ZENODO_FILE_URL = "https://zenodo.org/records/{record}/files/{filename}?download=1"
 
 _CHUNK = 1 << 20
+
+
+def register_dataset(dataset):
+    """Add a dataset to the :data:`DATASETS` registry.
+
+    The dataset is a dictionary of metadata; see :data:`REQUIRED_KEYS` for the
+    keys it must define and :data:`MUSIC_BOX` for a complete example. A name
+    that is already registered is replaced.
+
+    :param dataset: metadata of the dataset
+    :type dataset: dict
+    :return: the registered dataset
+    :rtype: dict
+    """
+    missing = [key for key in REQUIRED_KEYS if key not in dataset]
+    if missing:
+        raise ValueError(f"The dataset is missing the keys: {', '.join(missing)}.")
+    DATASETS[dataset["name"]] = dataset
+    return dataset
+
+
+def list_datasets():
+    """Names and descriptions of the registered datasets.
+
+    :return: description of each dataset, by name
+    :rtype: dict
+    """
+    return {name: dataset.get("description", "") for name, dataset in sorted(DATASETS.items())}
+
+
+def _get_dataset(name):
+    """Look a dataset up in the registry, by name or as a metadata dictionary."""
+    if isinstance(name, dict):
+        return name
+    try:
+        return DATASETS[name]
+    except KeyError:
+        raise ValueError(
+            f"Unknown dataset '{name}'. The registered datasets are: "
+            f"{', '.join(sorted(DATASETS))}."
+        ) from None
 
 
 def get_data_dir(data_dir=None):
@@ -215,9 +304,10 @@ def _patch_header(header, dataset, first_frame, n_frames):
     header = header[: frame_info.start()] + block + header[frame_info.end():]
 
     last = first_frame + n_frames - 1
+    source = dataset.get("doi") or dataset.get("url") or f"Zenodo record {dataset['record']}"
     comment = (
         f"Frames {first_frame} to {last} of {dataset['data_file']} "
-        f"({dataset['doi']}), downloaded by pyidi.datasets."
+        f"({source}), downloaded by pyidi.datasets."
     )
     header, count = re.subn(r"<comment>[^<]*</comment>", f"<comment>{comment}</comment>", header)
     if count == 0:
@@ -225,26 +315,54 @@ def _patch_header(header, dataset, first_frame, n_frames):
     return header
 
 
-def fetch_music_box(n_frames=600, first_frame=400, data_dir=None, progress=True, force=False):
-    """Download the music-box recording and return the path to its header file.
+def _resolve_window(dataset, n_frames, first_frame):
+    """Resolve the requested window against the defaults of a dataset.
 
-    The full recording (36 GiB) and the excerpt used here (3000 frames, 2.0 GiB)
-    are published at https://doi.org/10.5281/zenodo.22105821. Only the requested
-    frames are downloaded and they are cached, so the second call is free. One
-    frame is 640x552 px of 16-bit data, i.e. 0.67 MiB; the 600 frames of the
-    default window are 404 MiB.
+    :param dataset: dataset metadata dictionary
+    :type dataset: dict
+    :param n_frames: number of frames, None for the default of the dataset and
+        ``'all'`` for the whole file
+    :type n_frames: int, 'all' or None
+    :param first_frame: index of the first frame, None for the default of the
+        dataset
+    :type first_frame: int or None
+    :return: first frame and number of frames
+    :rtype: tuple of int
+    """
+    available = dataset["n_frames_total"]
+    if first_frame is None:
+        first_frame = dataset.get("default_first_frame", 0)
+    if n_frames is None:
+        n_frames = dataset.get("default_n_frames", available - first_frame)
+    elif n_frames == "all":
+        n_frames = available - first_frame
 
-    In the excerpt, one tooth is ringing from the start and another one is
-    plucked at about frame 350. The default window opens after that pluck, where
-    both teeth ring freely and the motion is smooth enough to be tracked from a
-    single reference image. Use ``first_frame=0`` to include the pluck itself,
-    which is a much harder case: the tooth then moves by more than 10 px between
-    consecutive frames.
+    if first_frame < 0 or n_frames < 1 or first_frame + n_frames > available:
+        raise ValueError(
+            f"The '{dataset['name']}' dataset has {available} frames, cannot read "
+            f"{n_frames} frames from frame {first_frame}."
+        )
+    return first_frame, n_frames
 
-    :param n_frames: number of frames to download. If None, the excerpt is
-        downloaded to its end (3000 frames). Defaults to 600.
-    :type n_frames: int or None, optional
-    :param first_frame: index of the first downloaded frame, defaults to 400
+
+def fetch_dataset(name, n_frames=None, first_frame=None, data_dir=None, progress=True, force=False):
+    """Download a window of a dataset and return the path to its header file.
+
+    Only the requested frames are downloaded and they are cached, so the second
+    call is free. Each window is cached under its own name, so asking for a
+    different window downloads it next to the first one rather than replacing
+    it.
+
+    :param name: name of a registered dataset, see :func:`list_datasets`. A
+        metadata dictionary is also accepted, for a dataset that is not
+        registered.
+    :type name: str or dict
+    :param n_frames: number of frames to download. If None, the default window
+        of the dataset is used, and ``'all'`` downloads the file to its end.
+        Defaults to None.
+    :type n_frames: int, 'all' or None, optional
+    :param first_frame: index of the first downloaded frame. If None, the
+        default of the dataset is used. Defaults to None.
     :type first_frame: int, optional
     :param data_dir: cache directory, see :func:`get_data_dir`. Defaults to None.
     :type data_dir: str, optional
@@ -256,21 +374,14 @@ def fetch_music_box(n_frames=600, first_frame=400, data_dir=None, progress=True,
     :return: path of the cached ``cihx`` file (the ``mraw`` file is next to it)
     :rtype: str
     """
-    dataset = MUSIC_BOX
-    available = dataset["n_frames"]
-    if n_frames is None:
-        n_frames = available - first_frame
-    if first_frame < 0 or n_frames < 1 or first_frame + n_frames > available:
-        raise ValueError(
-            f"The excerpt has {available} frames, cannot read {n_frames} frames "
-            f"from frame {first_frame}."
-        )
+    dataset = _get_dataset(name)
+    first_frame, n_frames = _resolve_window(dataset, n_frames, first_frame)
 
     data_dir = get_data_dir(data_dir)
     frame_bytes = dataset["image_height"] * dataset["image_width"] * dataset["bytes_per_pixel"]
-    name = f"{dataset['name']}_f{first_frame}_n{n_frames}"
-    cihx_path = os.path.join(data_dir, name + ".cihx")
-    mraw_path = os.path.join(data_dir, name + ".mraw")
+    cache_name = f"{dataset['name']}_f{first_frame}_n{n_frames}"
+    cihx_path = os.path.join(data_dir, cache_name + ".cihx")
+    mraw_path = os.path.join(data_dir, cache_name + ".mraw")
     complete = (
         os.path.exists(cihx_path)
         and os.path.exists(mraw_path)
@@ -282,9 +393,11 @@ def fetch_music_box(n_frames=600, first_frame=400, data_dir=None, progress=True,
 
     if progress:
         size = n_frames * frame_bytes / 1024**2
+        source = dataset.get("doi") or dataset.get("url") or f"Zenodo record {dataset['record']}"
+        licence = dataset.get("license")
         print(
-            f"Downloading {n_frames} frames ({size:.0f} MiB) of the music-box recording "
-            f"({dataset['doi']}, {dataset['license']}) to {data_dir}."
+            f"Downloading {n_frames} frames ({size:.0f} MiB) of the {dataset['name']} recording "
+            f"({source}{', ' + licence if licence else ''}) to {data_dir}."
         )
 
     original_header = _fetch_header(dataset, data_dir, progress=progress)
@@ -304,7 +417,8 @@ def fetch_music_box(n_frames=600, first_frame=400, data_dir=None, progress=True,
         label=f"{n_frames} frames",
     )
 
-    if n_frames == available and first_frame == 0 and _md5(mraw_path) != dataset["data_md5"]:
+    whole_file = first_frame == 0 and n_frames == dataset["n_frames_total"]
+    if whole_file and dataset.get("data_md5") and _md5(mraw_path) != dataset["data_md5"]:
         raise ConnectionError(f"Checksum mismatch of the downloaded {dataset['data_file']}.")
 
     with open(cihx_path, "w", encoding="utf-8") as f:
@@ -312,7 +426,52 @@ def fetch_music_box(n_frames=600, first_frame=400, data_dir=None, progress=True,
     return cihx_path
 
 
-def load_music_box(n_frames=600, first_frame=400, data_dir=None, progress=True, force=False):
+def load_dataset(name, n_frames=None, first_frame=None, data_dir=None, progress=True, force=False):
+    """Load a dataset, downloading it on first use.
+
+    See :func:`list_datasets` for what is available and :func:`fetch_dataset`
+    for the arguments, which are passed on.
+
+    :return: reader of the downloaded recording
+    :rtype: :class:`pyidi.video_reader.VideoReader`
+    """
+    cihx_path = fetch_dataset(
+        name, n_frames=n_frames, first_frame=first_frame, data_dir=data_dir,
+        progress=progress, force=force,
+    )
+    return VideoReader(cihx_path)
+
+
+def fetch_music_box(n_frames=None, first_frame=None, data_dir=None, progress=True, force=False):
+    """Download the music-box recording and return the path to its header file.
+
+    The full recording (36 GiB) and the excerpt used here (3000 frames, 2.0 GiB)
+    are published at https://doi.org/10.5281/zenodo.22105821. Only the requested
+    frames are downloaded and they are cached, so the second call is free. One
+    frame is 640x552 px of 16-bit data, i.e. 0.67 MiB; the 600 frames of the
+    default window are 404 MiB.
+
+    In the excerpt, one tooth is ringing from the start and another one is
+    plucked at about frame 350. The default window (600 frames from frame 400)
+    opens after that pluck, where both teeth ring freely and the motion is
+    smooth enough to be tracked from a single reference image. Use
+    ``first_frame=0`` to include the pluck itself, which is a much harder case:
+    the tooth then moves by more than 10 px between consecutive frames.
+
+    This is :func:`fetch_dataset` with ``name='music_box'``; see it for the
+    arguments, which are passed on. ``n_frames='all'`` downloads the excerpt to
+    its end.
+
+    :return: path of the cached ``cihx`` file (the ``mraw`` file is next to it)
+    :rtype: str
+    """
+    return fetch_dataset(
+        MUSIC_BOX["name"], n_frames=n_frames, first_frame=first_frame,
+        data_dir=data_dir, progress=progress, force=force,
+    )
+
+
+def load_music_box(n_frames=None, first_frame=None, data_dir=None, progress=True, force=False):
     """Load the music-box recording, downloading it on first use.
 
     A high-speed video of the vibrating steel comb of a mechanical music box,
@@ -342,3 +501,6 @@ def load_music_box(n_frames=600, first_frame=400, data_dir=None, progress=True, 
         progress=progress, force=force,
     )
     return VideoReader(cihx_path)
+
+
+register_dataset(MUSIC_BOX)

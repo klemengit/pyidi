@@ -1,3 +1,4 @@
+import hashlib
 import io
 import os
 import sys
@@ -126,6 +127,116 @@ def test_download_without_range_support(tmp_path, monkeypatch):
     # a download from the start of the file can still be truncated to the request
     datasets._download('https://example.org/f', destination, start=0, end=255, progress=False)
     assert open(destination, 'rb').read() == content[:256]
+
+
+def _fake_urlopen_files(files, status=206):
+    """``urlopen`` replacement serving several files, routed by the URL."""
+    def urlopen(request, *args, **kwargs):
+        url = request.full_url
+        for filename, content in files.items():
+            if filename in url:
+                break
+        else:
+            raise AssertionError(f'unexpected URL {url}')
+        header = request.get_header('Range')
+        if header is None:
+            return _FakeResponse(content, 200)
+        first, last = header.replace('bytes=', '').split('-')
+        stop = int(last) + 1 if last else len(content)
+        return _FakeResponse(content[int(first):stop], status)
+    return urlopen
+
+
+FAKE_HEADER = HEADER.replace('3000', '10').replace('2999', '9')
+FAKE_FRAMES = 10
+FAKE_FRAME_BYTES = 4 * 5 * 2
+FAKE_MRAW = (bytes(range(256)) * 2)[:FAKE_FRAMES * FAKE_FRAME_BYTES]
+
+FAKE_DATASET = {
+    'name': 'fake_recording',
+    'description': 'A dataset that exists only in the tests.',
+    'record': '1',
+    'header_file': 'fake.cihx',
+    'data_file': 'fake.mraw',
+    'header_md5': hashlib.md5(FAKE_HEADER.encode()).hexdigest(),
+    'n_frames_total': FAKE_FRAMES,
+    'default_first_frame': 2,
+    'default_n_frames': 3,
+    'image_height': 4,
+    'image_width': 5,
+    'bytes_per_pixel': 2,
+}
+
+
+@pytest.fixture
+def fake_dataset(monkeypatch):
+    """Register a dataset for the duration of one test."""
+    monkeypatch.setitem(datasets.DATASETS, FAKE_DATASET['name'], FAKE_DATASET)
+    monkeypatch.setattr(
+        datasets.urllib.request, 'urlopen',
+        _fake_urlopen_files({'fake.cihx': FAKE_HEADER.encode(), 'fake.mraw': FAKE_MRAW}),
+    )
+    return FAKE_DATASET
+
+
+def test_music_box_is_registered():
+    assert datasets.DATASETS['music_box'] is datasets.MUSIC_BOX
+    assert 'music_box' in datasets.list_datasets()
+
+
+def test_register_dataset_requires_the_keys():
+    with pytest.raises(ValueError, match='header_md5'):
+        datasets.register_dataset({'name': 'incomplete', 'record': '1'})
+    assert 'incomplete' not in datasets.DATASETS
+
+
+def test_unknown_dataset_names_the_registered_ones():
+    with pytest.raises(ValueError, match='music_box'):
+        datasets.fetch_dataset('not_a_dataset')
+
+
+def test_fetch_dataset_downloads_the_default_window(tmp_path, fake_dataset):
+    cihx = datasets.fetch_dataset('fake_recording', data_dir=str(tmp_path), progress=False)
+
+    assert os.path.basename(cihx) == 'fake_recording_f2_n3.cihx'
+    mraw = cihx[: -len('.cihx')] + '.mraw'
+    start = 2 * FAKE_FRAME_BYTES
+    assert open(mraw, 'rb').read() == FAKE_MRAW[start: start + 3 * FAKE_FRAME_BYTES]
+
+    patched = open(cihx, encoding='utf-8').read()
+    assert '<recordedFrame>3</recordedFrame>' in patched
+    assert 'Frames 2 to 4' in patched
+
+
+def test_fetch_dataset_window_arguments(tmp_path, fake_dataset):
+    cihx = datasets.fetch_dataset(
+        'fake_recording', n_frames='all', first_frame=0, data_dir=str(tmp_path), progress=False)
+    assert os.path.basename(cihx) == 'fake_recording_f0_n10.cihx'
+
+    cihx = datasets.fetch_dataset(
+        'fake_recording', n_frames=1, data_dir=str(tmp_path), progress=False)
+    assert os.path.basename(cihx) == 'fake_recording_f2_n1.cihx'   # the default first_frame
+
+    with pytest.raises(ValueError, match='fake_recording'):
+        datasets.fetch_dataset(
+            'fake_recording', n_frames=99, data_dir=str(tmp_path), progress=False)
+
+
+def test_fetch_dataset_accepts_an_unregistered_dictionary(tmp_path, fake_dataset):
+    unregistered = dict(FAKE_DATASET, name='not_registered')
+    cihx = datasets.fetch_dataset(
+        unregistered, n_frames=1, first_frame=0, data_dir=str(tmp_path), progress=False)
+    assert os.path.basename(cihx) == 'not_registered_f0_n1.cihx'
+
+
+def test_fetch_dataset_is_cached(tmp_path, fake_dataset, monkeypatch):
+    datasets.fetch_dataset('fake_recording', data_dir=str(tmp_path), progress=False)
+
+    def fail(*args, **kwargs):
+        raise AssertionError('the cached window was downloaded again')
+
+    monkeypatch.setattr(datasets.urllib.request, 'urlopen', fail)
+    datasets.fetch_dataset('fake_recording', data_dir=str(tmp_path), progress=False)
 
 
 @pytest.mark.skipif(

@@ -22,6 +22,15 @@ the 36 GiB of the full recording). An interrupted download is resumed. The new
 `examples/Showcase_music_box.ipynb` walks from the raw video to the notes of
 the comb and to the operating deflection shape of a single tooth.
 
+A dataset is a dictionary of metadata in the `pyidi.datasets.DATASETS` registry,
+so the next one needs no new code: `list_datasets()` says what is available,
+`load_dataset(name)` loads any of it, and `register_dataset()` accepts a
+recording that is not part of pyidi. The named shortcuts, `load_music_box()` and
+`fetch_music_box()`, remain. What the registry assumes is what every dataset
+published this way has in common — a Zenodo record holding a Photron `cihx`
+header next to an uncompressed `mraw` file of fixed-size frames, so that a
+window can be addressed by byte offset.
+
 ### Fixes
 
 `configure(show_pbar=False)` was ignored by `LucasKanade` and `DIC` when running

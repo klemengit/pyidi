@@ -8,6 +8,14 @@ package. They are published on Zenodo and downloaded on first use into
 ``~/.pyidi/datasets``. The cache directory can be changed with the
 ``PYIDI_DATA_DIR`` environment variable or with the ``data_dir`` argument.
 
+.. code:: python
+
+    pyidi.datasets.list_datasets()          # {'music_box': 'Vibrating comb of a ...'}
+    video = pyidi.datasets.load_dataset('music_box')
+
+Every dataset is loaded the same way, through :func:`pyidi.datasets.load_dataset`;
+each one also has a named shortcut, such as :func:`pyidi.datasets.load_music_box`.
+
 Music box
 ---------
 
@@ -33,7 +41,7 @@ frequencies with sub-pixel amplitudes on a naturally speckled surface.
     :alt: measurement points on the comb and the identified displacement spectra
 
 One frame is 0.67 MiB, so the 600 frames of the default window are a 404 MiB
-download. The published excerpt holds 3000 frames (0.4 s) and ``n_frames=None``
+download. The published excerpt holds 3000 frames (0.4 s) and ``n_frames='all'``
 downloads it to its end. The excerpt itself is a part of a 36 GiB recording of
 55 238 frames, which is in the same Zenodo record and can be downloaded manually
 if a longer signal is needed.
@@ -64,3 +72,33 @@ If you use the dataset, please cite it:
 
 The arguments of the loader are documented with the rest of the source code, see
 :mod:`pyidi.datasets`.
+
+Adding a dataset
+----------------
+
+A dataset is a dictionary of metadata in the ``pyidi.datasets.DATASETS`` registry,
+so adding one needs no new code. The download strategy is shared: a Zenodo record
+holding a Photron ``cihx`` header next to an uncompressed ``mraw`` file of
+fixed-size frames, which is what lets a window be addressed by byte offset and
+fetched with a range request.
+
+.. code:: python
+
+    pyidi.datasets.register_dataset({
+        'name': 'my_recording',
+        'record': '1234567',            # Zenodo record id
+        'header_file': 'my_recording.cihx',
+        'data_file': 'my_recording.mraw',
+        'header_md5': '...',
+        'n_frames_total': 5000,
+        'image_height': 512,
+        'image_width': 512,
+        'bytes_per_pixel': 2,
+    })
+    video = pyidi.datasets.load_dataset('my_recording')
+
+``register_dataset`` accepts a dataset from anywhere, so a recording that is not
+part of pyidi can be loaded through the same functions. A dataset that ships with
+pyidi is simply registered in ``pyidi/datasets.py``. The optional keys are ``doi``,
+``url``, ``data_md5``, ``fps``, ``license``, ``citation``, ``description``,
+``default_first_frame`` and ``default_n_frames``.

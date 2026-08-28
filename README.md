@@ -125,6 +125,11 @@ octaves:
 
 <img src="docs/source/quick_start/music_box_teeth.png" width="800" />
 
+Datasets are a registry, so this one is loaded like any other: `pyidi.datasets.list_datasets()`
+says what is available, `pyidi.datasets.load_dataset('music_box')` loads it, and
+`pyidi.datasets.register_dataset()` accepts a recording of your own published the same way
+(a Zenodo record with a Photron `cihx` header next to an uncompressed `mraw` file).
+
 The full example is in [`examples/Showcase_music_box.ipynb`](examples/Showcase_music_box.ipynb):
 from the raw video to the notes of the comb and to the operating deflection shape of a single
 tooth. If you use the dataset, please cite it:
