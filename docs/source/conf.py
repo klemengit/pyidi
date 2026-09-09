@@ -55,6 +55,9 @@ extensions = [
 # MyST is enabled so that Markdown files kept at the repository root (the
 # changelog) can be included in the build without being converted to rst.
 myst_enable_extensions = ['colon_fence', 'deflist']
+# changelog.rst supplies the page title and includes CHANGELOG.md from its
+# first release heading on, so the included fragment starts at H2 by design.
+suppress_warnings = ['myst.header']
 myst_heading_anchors = 3
 
 intersphinx_mapping = {
@@ -79,6 +82,12 @@ autodoc_default_options = {
 }
 autodoc_member_order = 'bysource'
 autodoc_typehints = 'description'
+
+# The GUI classes are documented from their docstrings, but Read the Docs
+# installs only ``docs/requirements.txt`` and so has neither Qt nor napari.
+# Mocking the toolkits lets autodoc import the modules and read the
+# docstrings without a display or the ``[qt]`` extra.
+autodoc_mock_imports = ['PyQt6', 'pyqtgraph', 'qtpy', 'napari', 'magicgui']
 
 napoleon_google_docstring = True
 napoleon_numpy_docstring = True

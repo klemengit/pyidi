@@ -1650,8 +1650,9 @@ class SelectionGUIOld(QtWidgets.QMainWindow):
     
     @property
     def points(self):
+        """The selected points, as returned by :meth:`get_points`."""
         return self.get_points()
-    
+
     def get_filtered_points(self):
         """Get candidate points from filtering."""
         return np.array(self.candidate_points)[:, ::-1] if hasattr(self, 'candidate_points') else []

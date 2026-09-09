@@ -59,7 +59,23 @@ The window `SelectionGUI` named in 1.3 is now `SelectionGUIOld` — deprecated,
 and removed in 1.5. It takes the same arguments and returns the same points,
 so scripts carry over unchanged.
 
-<img src="docs/source/quick_start/feature_selection.gif" width="800" />
+<img src="https://raw.githubusercontent.com/ladisk/pyidi/master/docs/source/quick_start/feature_selection.gif" width="800" />
+
+### Or select points without a GUI
+
+The same mask/evaluate/select pipeline is importable on its own, with no Qt
+needed — useful in scripts, batch processing and on headless machines:
+
+```python
+from pyidi.selection import Entry, select_points
+
+region = Entry('polygon', [(20, 20), (20, 200), (180, 200), (180, 20)])
+points = select_points(video.get_frame(0), [region], subset_size=21, separation=15)
+```
+
+`separation` — the closest two points may come — is the one control for how
+many you get. Use `SelectionPipeline` instead when you are sweeping parameters,
+as it keeps the computed scores cached between runs.
 
 ### Or drive everything from the napari UI
 
@@ -72,7 +88,7 @@ gui = GUI(video)
 displacements = gui.method.displacements
 ```
 
-<img src="docs/source/quick_start/gifs/napari_full_sof.gif" width="800" />
+<img src="https://raw.githubusercontent.com/ladisk/pyidi/master/docs/source/quick_start/gifs/napari_full_sof.gif" width="800" />
 
 ## Example dataset
 
@@ -100,7 +116,7 @@ amplitudes on a naturally speckled surface — a convenient benchmark for displa
 identification. The identified frequencies land within a few cents of equal-tempered
 pitches across nearly two octaves:
 
-<img src="docs/source/quick_start/music_box_teeth.png" width="800" />
+<img src="https://raw.githubusercontent.com/ladisk/pyidi/master/docs/source/quick_start/music_box_teeth.png" width="800" />
 
 Datasets are a registry, so this one is loaded like any other:
 `pyidi.datasets.list_datasets()` says what is available,
@@ -108,7 +124,7 @@ Datasets are a registry, so this one is loaded like any other:
 `pyidi.datasets.register_dataset()` accepts a recording of your own published the same
 way — a Zenodo record with a Photron `cihx` header next to an uncompressed `mraw` file.
 
-The full example is in [`examples/Showcase_music_box.ipynb`](examples/Showcase_music_box.ipynb):
+The full example is in [`examples/Showcase_music_box.ipynb`](https://github.com/ladisk/pyidi/blob/master/examples/Showcase_music_box.ipynb):
 from the raw video to the notes of the comb and to the operating deflection shape of a
 single tooth. If you use the dataset, please cite it:
 
@@ -127,6 +143,43 @@ single tooth. If you use the dataset, please cite it:
 
 The Lucas-Kanade inner loop is compiled with `numba` and parallelized over points —
 one to two orders of magnitude faster than the NumPy implementation.
+
+`DirectionalLucasKanade` also accepts a known rigid-body translation, so that the
+result is the local motion rather than each point's absolute position:
+
+```python
+dlk.set_rigid_body_motion(rbm_ij)   # (n_time_points, 2), in pixels
+```
+
+The tracking window follows the prescribed motion and it is subtracted back out of
+the result. Only its component along each point's tracking direction is used.
+
+## Removing rigid-body motion with fiducial markers
+
+If the camera or the whole test rig moved during the recording, that motion is in
+every displacement you identify. `pyidi.Fiducial` tracks ArUco markers fixed to
+the moving body, fits the frame-to-reference transformation they imply, and takes
+it back out — either from the identified coordinates or from the frames
+themselves, before identification:
+
+```python
+from pyidi import Fiducial
+
+fid = Fiducial(video.get_frames())            # (n_time_points, height, width)
+markers = fid.detect_markers(marker_type='aruco')
+transformations = fid.compute_transformations(markers, transform_type='euclidean')
+
+stabilized = fid.revert_frames(transformations)   # or revert_fiducial() on coordinates
+```
+
+The transformation can be `euclidean`, `affine` or `homography`, and
+`uncertainty_analysis()` reports how well the markers pinned it down. Frames that
+could not be reverted come back as `NaN`.
+
+Marker detection needs 8-bit frames. A deeper recording goes through
+`pre_process(clip_range=(min, max))` first, which maps the given range onto 8-bit
+and can also equalize contrast or blur to help detection. See
+[`examples/Showcase_fiducial.ipynb`](https://github.com/ladisk/pyidi/blob/master/examples/Showcase_fiducial.ipynb).
 
 ## Pre-test motion visualization
 
