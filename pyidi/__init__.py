@@ -22,13 +22,13 @@ if not _THREADING_LAYER_FROM_ENV:
         # counts, as long as the thread pool has not been started yet.
         _sys.modules['numba'].config.THREADING_LAYER = 'forksafe'
 
-# from .pyidi import *
 from .pyidi_legacy import pyIDI
 from . import tools
 from . import postprocessing
 from . import datasets
 from .load_analysis import load_analysis
 from .video_reader import VideoReader
+from . import selection
 from .methods import *
 from .GUIs import *
 from .fiducial import *

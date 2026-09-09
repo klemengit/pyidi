@@ -6,6 +6,7 @@ import json
 import glob
 import shutil
 import inspect
+import warnings
 import matplotlib.pyplot as plt
 
 from ..video_reader import VideoReader
@@ -269,17 +270,69 @@ class IDIMethod:
         return settings
     
     def set_points(self, points):
-        from ..GUIs.selection import SubsetSelection
-        
-        if isinstance(points, list):
-            points = np.array(points)
-        elif isinstance(points, SubsetSelection):
-            points = np.array(points.points)
+        """
+        Set the points at which the displacements will be computed.
 
-        points = np.array(points)
+        Accepts a plain array-like of points, or a selection GUI object that
+        exposes a ``.points`` attribute/property (e.g. :class:`~pyidi.SelectionGUI`)
+        - duck-typed so this method does not need to import the GUI, and therefore
+        does not drag the optional Qt dependency into this code path.
+
+        Points are given as row/column (y/x) image coordinates: ``points[:, 0]``
+        is the row (y) coordinate and ``points[:, 1]`` is the column (x)
+        coordinate.
+
+        :param points: Points to be set, as an array-like of shape ``(n_points, 2)``,
+            or an object with a ``.points`` attribute of that shape.
+        :type points: array_like or object
+        :raises ValueError: if `points` is empty, is not 2-dimensional, does not have
+            exactly 2 columns, or (when the video's image size is known) contains
+            coordinates outside of the image bounds.
+        """
+        if hasattr(points, 'points'):
+            points = np.array(points.points)
+        else:
+            points = np.array(points)
+
+        if points.size == 0:
+            raise ValueError("Points must not be empty.")
+
+        if points.ndim != 2:
+            raise ValueError(
+                f"Points must be a 2-dimensional array of shape (n_points, 2), got shape {points.shape}."
+            )
+
         if points.shape[1] != 2:
-            raise ValueError("Points must have two columns.")
-        
+            raise ValueError(
+                f"Points must have exactly two columns (row, column), got {points.shape[1]}."
+            )
+
+        if not np.issubdtype(points.dtype, np.integer):
+            rounded = np.rint(points)
+            n_changed = int(np.count_nonzero(np.any(rounded != points, axis=1)))
+            if n_changed:
+                warnings.warn(
+                    f"{n_changed} of {points.shape[0]} points had non-integer (sub-pixel) "
+                    "coordinates. They have been rounded to the nearest integer pixel."
+                )
+            points = rounded.astype(np.int64)
+
+        video = getattr(self, 'video', None)
+        if video is not None and hasattr(video, 'image_width') and hasattr(video, 'image_height'):
+            MAX_OFFENDERS_SHOWN = 5
+            rows_ok = (points[:, 0] >= 0) & (points[:, 0] < video.image_height)
+            cols_ok = (points[:, 1] >= 0) & (points[:, 1] < video.image_width)
+            out_of_bounds = ~(rows_ok & cols_ok)
+            n_bad = int(np.count_nonzero(out_of_bounds))
+            if n_bad:
+                bad = points[out_of_bounds][:MAX_OFFENDERS_SHOWN]
+                shown = min(MAX_OFFENDERS_SHOWN, n_bad)
+                raise ValueError(
+                    f"{n_bad} of {points.shape[0]} points are outside the image bounds "
+                    f"(0 <= row < {video.image_height}, 0 <= column < {video.image_width}). "
+                    f"First offenders: {bad.tolist()} (showing {shown} of {n_bad})."
+                )
+
         self.points = points
 
     def show_points(self, figsize=(15, 5), cmap='gray', color='r'):
