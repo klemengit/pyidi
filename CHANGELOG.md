@@ -475,6 +475,19 @@ converge. The error is now returned as its absolute value.
 - **`configure(show_pbar=False)` was ignored by `LucasKanade` and `DIC`** when
   running in a single process; the progress bar was always shown.
   `DirectionalLucasKanade` already honoured the setting.
+- **`Fiducial.detect_markers()` always failed on its own default.** The
+  constructor stores the recording as an array, but detection required a
+  `list` and raised `ValueError` for anything else, so the only way in was the
+  list returned by `pre_process()` — which is documented as optional. Both an
+  array and a list are now accepted. A recording deeper than 8 bits, which the
+  OpenCV detectors cannot read, now says so instead of failing on an assertion
+  inside OpenCV.
+- **`Fiducial.revert_frames()` returned a frame it could not revert as black
+  rather than as `NaN`.** The result was allocated with the dtype of the video,
+  so the `NaN` marking a frame with no transformation — and the `NaN` border
+  requested for the homography path — was cast to an ordinary pixel value on any
+  integer recording. The result is now float, and a skipped frame is `NaN`
+  throughout.
 
 ### Point selection consolidated on one window
 
