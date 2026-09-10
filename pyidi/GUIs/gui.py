@@ -51,9 +51,14 @@ default_values = {
 
 class GUI:
     """
-    A class for using pyidi with a GUI (Napari)
-    ----------
-    
+    Drive a full analysis from the napari interface.
+
+    Opens the recording in napari, where the method, the points and the
+    settings are chosen interactively. The configured method is left on
+    ``self.method``, so the results are read from
+    ``gui.method.displacements`` once the analysis has run.
+
+    Requires the ``[qt]`` extra: ``pip install pyidi[qt]``.
     """
 
     def __init__(self, video):

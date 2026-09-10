@@ -107,8 +107,101 @@ def test_revert_frames_shape():
     assert compensated.shape == test.video.shape, "Compensated video shape mismatch"
 
 
+
+def _synthetic_aruco_video(dtype=np.uint8, scale=1):
+    """A short recording of two ArUco markers translating by a known amount.
+
+    Self-contained, so the checks below do not need the .sfmov data file.
+    """
+    dictionary = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
+    first = cv2.aruco.generateImageMarker(dictionary, 0, 60)
+    second = cv2.aruco.generateImageMarker(dictionary, 1, 60)
+
+    frames = []
+    for dy, dx in [(0, 0), (5, 3), (11, 7), (-4, 9)]:
+        frame = np.full((300, 300), 255, np.uint8)
+        frame[40 + dy:100 + dy, 40 + dx:100 + dx] = first
+        frame[180 + dy:240 + dy, 200 + dx:260 + dx] = second
+        frames.append(frame)
+
+    return np.stack(frames).astype(dtype) * scale
+
+
+def test_detect_markers_without_pre_processing():
+    """
+    ``pre_process`` is documented as optional, so detection has to accept the
+    array the class already holds. It used to demand a list and so raised
+    ValueError on its own default.
+    """
+    test = pyidi.fiducial.Fiducial(_synthetic_aruco_video())
+
+    from_attribute = test.detect_markers()
+    from_list = test.detect_markers(list(test.video))
+
+    assert len(from_attribute) == len(test.video), "One result per frame expected"
+    assert all(frame for frame in from_attribute), "Markers should be found in every frame"
+    assert from_attribute == from_list, "An array and a list of frames must agree"
+
+
+def test_detect_markers_rejects_unusable_input():
+    """Detection says what is wrong rather than failing inside OpenCV."""
+    test = pyidi.fiducial.Fiducial(_synthetic_aruco_video())
+
+    with pytest.raises(ValueError, match="8-bit"):
+        pyidi.fiducial.Fiducial(_synthetic_aruco_video(np.uint16, 257)).detect_markers()
+
+    with pytest.raises(ValueError):
+        test.detect_markers("not a video")
+
+    with pytest.raises(ValueError):
+        test.detect_markers(np.zeros((4, 4), dtype=np.uint8))
+
+    with pytest.raises(ValueError):
+        test.detect_markers([])
+
+
+def test_revert_frames_undoes_known_motion():
+    """
+    The markers move rigidly, so reverting has to put every frame back onto the
+    reference one. The result is float, so that a frame which could not be
+    reverted stays NaN instead of casting to a black one.
+    """
+    video = _synthetic_aruco_video()
+    test = pyidi.fiducial.Fiducial(video)
+
+    markers = test.detect_markers()
+    matrices = test.compute_transformations(markers, transform_type="euclidean")
+    reverted = test.revert_frames(matrices)
+
+    assert reverted.shape == video.shape
+    assert np.issubdtype(reverted.dtype, np.floating), "NaN must be representable"
+
+    reference = video[0].astype(float)
+    for i, frame in enumerate(reverted):
+        covered = np.isfinite(frame)
+        assert covered.any(), f"Frame {i} was not reverted at all"
+        assert np.abs(frame[covered] - reference[covered]).max() == 0, (
+            f"Frame {i} does not land back on the reference frame"
+        )
+
+
+def test_revert_frames_marks_a_skipped_frame_as_nan():
+    """A frame with no transformation is NaN, not a black frame."""
+    test = pyidi.fiducial.Fiducial(_synthetic_aruco_video())
+
+    matrices = test.compute_transformations(test.detect_markers())
+    matrices[2] = None
+
+    reverted = test.revert_frames(matrices)
+    assert np.isnan(reverted[2]).all(), "A skipped frame must be entirely NaN"
+    assert np.isfinite(reverted[0]).any(), "Other frames are unaffected"
+
 if __name__ == '__main__':
     test_instance()
     test_instance_rgb2gray()
     test_compensation()
     test_revert_frames_shape()
+    test_detect_markers_without_pre_processing()
+    test_detect_markers_rejects_unusable_input()
+    test_revert_frames_undoes_known_motion()
+    test_revert_frames_marks_a_skipped_frame_as_nan()

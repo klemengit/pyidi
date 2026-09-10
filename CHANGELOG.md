@@ -3,7 +3,46 @@
 This changelog starts at version 1.4.0. For earlier versions see the
 [commit history](https://github.com/ladisk/pyidi/commits/master).
 
-## Unreleased
+## 1.4.0
+
+### Lucas-Kanade performance
+
+The inner optimization loop is now compiled with `numba` and parallelized over
+points. Measured against 1.3.3 on the same machine, with identical results:
+
+| case | 1.3.3 | 1.4.0 | speedup |
+| --- | --- | --- | --- |
+| `data_synthetic.cih`, 200 points, 101 frames | 7.94 s | 0.10 s | 77x |
+| synthetic 512x512, 400 points, 150 frames | 21.04 s | 0.24 s | 89x |
+| `data_synthetic.mp4`, 60 points, 10 frames | 2.16 s | 0.06 s | 36x |
+
+The compiled path is on by default. `configure(use_compiled_kernel=False)`
+selects the previous NumPy implementation, which is itself faster than 1.3.3
+(about 1.6x, and more on video and image files) because the frame is no longer
+re-read for every point. Results from the two paths agree to floating-point
+round-off. If numba cannot be imported, pyidi falls back to the NumPy
+implementation automatically and warns, rather than failing to import.
+
+The compiled kernel supports cubic interpolation only; `int_order` other than `3`
+falls back to the NumPy implementation and warns once.
+
+### Directional Lucas-Kanade performance
+
+`DirectionalLucasKanade` now uses the same compiled kernel machinery. The spline
+evaluation is shared with Lucas-Kanade; only the least-squares solve differs,
+because the motion is constrained to one prescribed direction and so has a
+single unknown instead of two. Measured against 1.3.3 on the same machine, with
+identical results:
+
+| case | 1.3.3 | 1.4.0 | speedup |
+| --- | --- | --- | --- |
+| `data_synthetic.cih`, 120 points, 101 frames | 1.46 s | 0.04 s | 38x |
+| synthetic 512x512, 400 points, 150 frames | 7.46 s | 0.11 s | 65x |
+| `data_synthetic.mp4`, 60 points, 10 frames | 1.25 s | 0.03 s | 41x |
+
+As for Lucas-Kanade, the frame is now read once per time step instead of once
+per point. That alone makes the NumPy path about 18x faster on video and image
+files; on memory-mapped formats it makes no measurable difference.
 
 ### `SelectionGUI` is now the automatic feature selection interface
 
@@ -48,44 +87,6 @@ What does not carry over, for anything that reached deeper:
 unchanged. `FeatureSelectionGUI`, the working name used while this was being
 built, never appeared in a release; the name raises a `RuntimeError` saying
 where it went.
-
-### The active tab and tool are visible
-
-Both groups of buttons -- the two tabs across the top, and the region tools --
-were left to the platform theme to mark, and a default theme separates a
-checked `QPushButton` from an unchecked one by a shade or two. That is not a
-difference you can find across a panel, and this interface asks the question
-twice: which tab am I on, and which tool is active. A checked button is now
-filled and bold, in the blue the selections list already highlights with.
-
-Only the checked state is styled. Everything else stays whatever the platform
-theme makes it, so the window does not have to carry a theme of its own to have
-a legible one -- which is what the older window did, and why it looks dated on
-a modern desktop.
-
-### Erasing is a tool, not a mode the brush is in
-
-`Remove w/ brush` joins the mask tools, next to `Remove point`. It replaces the
-`Deselect painted area` toggle that used to sit inside the brush controls,
-which made painting a mode within a mode: the same brush added or subtracted
-depending on a checkable button several rows below it, and which one it was
-about to do was not visible where the work happened.
-
-The two tools that take away are now side by side, at the two scales they
-work at -- one point, or everything a stroke covers. `Remove w/ brush` is the
-brush in reverse and shares its radius, so a stroke erases exactly as wide as
-it paints. What it does is unchanged: it subtracts only the part actually
-painted over, a region keeps whatever the stroke missed, and it disappears
-only once nothing of it is left.
-
-Two controls on that tab also stop being shown when nothing can act on them.
-`Brush radius` appears for the tools that paint, and `Point spacing` for a row
-that lays points out along or inside its shape -- a polygon, line or brush
-stroke in the `points` role. Neither is read otherwise: a `mask` row has its
-points chosen by the selection, so their distance is the separation on the
-other tab, and a `points`-tool row is the coordinates that were clicked. This
-follows what the selector's own settings already did, appearing and
-disappearing with the selector rather than greying out.
 
 ### Automatic feature selection
 
@@ -251,7 +252,7 @@ added to a redraw on that tab.
 
 The subset size takes odd values only, by stepping and by typing: a subset is
 centred on its point, so an even extent has no centre to be, and the pipeline
-reads one as the odd size below it in any case — a subset size of 10 scores
+reads one as the odd size above it in any case — a subset size of 10 scores
 through an 11-pixel window and draws an 11-pixel rectangle — so the even values
 were a second spelling of the odd ones. It sits below the tabs rather than on
 one of them: the scoring window follows it, which is what makes it one of the few settings that stales
@@ -308,173 +309,43 @@ border used values reflected from inside it; the whole-image version sees the
 real neighbours. The new value is the correct one. This affects the new module
 only — `SelectionGUIOld` is untouched and behaves exactly as before.
 
-### Example datasets
+### The active tab and tool are visible
 
-`pyidi.datasets` downloads example recordings from Zenodo on first use and
-caches them in `~/.pyidi/datasets` (or in `PYIDI_DATA_DIR`):
+Both groups of buttons -- the two tabs across the top, and the region tools --
+were left to the platform theme to mark, and a default theme separates a
+checked `QPushButton` from an unchecked one by a shade or two. That is not a
+difference you can find across a panel, and this interface asks the question
+twice: which tab am I on, and which tool is active. A checked button is now
+filled and bold, in the blue the selections list already highlights with.
 
-```python
-video = pyidi.datasets.load_music_box()
-```
+Only the checked state is styled. Everything else stays whatever the platform
+theme makes it, so the window does not have to carry a theme of its own to have
+a legible one -- which is what the older window did, and why it looks dated on
+a modern desktop.
 
-The first dataset is a high-speed video of a vibrating music-box comb
-([10.5281/zenodo.22105821](https://doi.org/10.5281/zenodo.22105821), CC BY 4.0).
-Only the requested frames are downloaded, using HTTP range requests, so the
-default window costs 404 MiB instead of the 2 GiB of the published excerpt (or
-the 36 GiB of the full recording). An interrupted download is resumed. The new
-`examples/Showcase_music_box.ipynb` walks from the raw video to the notes of
-the comb and to the operating deflection shape of a single tooth.
+### Erasing is a tool, not a mode the brush is in
 
-A dataset is a dictionary of metadata in the `pyidi.datasets.DATASETS` registry,
-so the next one needs no new code: `list_datasets()` says what is available,
-`load_dataset(name)` loads any of it, and `register_dataset()` accepts a
-recording that is not part of pyidi. The named shortcuts, `load_music_box()` and
-`fetch_music_box()`, remain. What the registry assumes is what every dataset
-published this way has in common — a Zenodo record holding a Photron `cihx`
-header next to an uncompressed `mraw` file of fixed-size frames, so that a
-window can be addressed by byte offset.
+`Remove w/ brush` joins the mask tools, next to `Remove point`. It replaces the
+`Deselect painted area` toggle that used to sit inside the brush controls,
+which made painting a mode within a mode: the same brush added or subtracted
+depending on a checkable button several rows below it, and which one it was
+about to do was not visible where the work happened.
 
-### Documentation overhaul
+The two tools that take away are now side by side, at the two scales they
+work at -- one point, or everything a stroke covers. `Remove w/ brush` is the
+brush in reverse and shares its radius, so a stroke erases exactly as wide as
+it paints. What it does is unchanged: it subtracts only the part actually
+painted over, a region keeps whatever the stroke missed, and it disappears
+only once nothing of it is left.
 
-The documentation was restructured around the work done since 1.3.3. New
-pages: Eulerian video magnification, reading a video (all supported formats,
-including `.cine`, and the frame-rate caveats), results and reproducibility
-(where analyses are saved, `load_analysis`, resuming, and what a `NaN` in the
-result means), and an upgrading guide covering `SubsetSelection` ->
-`SelectionGUI`, `use_numba` -> `use_compiled_kernel`, the stricter
-`set_points()` contract, and the pre-1.0 `pyIDI` class.
-
-The methods page gained a "choosing a method" comparison, a parameter table
-per method, and a section on prescribed rigid-body motion in
-`DirectionalLucasKanade`. The mode-shape magnification and fiducial-marker
-pages, previously stubs reading "more documentation is coming soon", now
-document the actual API. `CHANGELOG.md` is rendered into the documentation.
-
-Sphinx gained `sphinx-design` (landing-page cards), `myst-parser` (Markdown),
-`napoleon` (the Google-style docstrings in `fiducial.py` render correctly now)
-and `intersphinx` (links into the numpy, scipy and Python documentation). The
-build is warning-free.
-
-Two source-level fixes fell out of writing this: `ResultViewer` documented its
-`displacements` argument as `(n_frames, n_points, 2)` when it indexes it as
-`(n_points, n_frames, 2)` — the shape `get_displacements()` actually returns —
-and `VideoReader.get_frame`'s docstring had a mis-indented field that broke
-its rendering. The old documentation also claimed `load_analysis()` returns
-two values; it returns three (`video, idi, settings`).
-
-### Eulerian video magnification
-
-New `EulerianMagnifier` class in `pyidi.postprocessing` (also available as a
-functional `eulerian_magnification()` wrapper) adds linear Eulerian Video
-Magnification (Wu et al., SIGGRAPH 2012) as a pre-test visualization tool: a
-Laplacian pyramid decomposition, a temporal band-pass filter applied per
-pyramid level, and linear amplification of the band-passed signal added back
-onto the original. It reveals subtle, often sub-pixel motion directly in the
-raw recording, before any displacement identification is run, so it is useful
-for checking whether (and where) a structure is moving and for picking
-regions of interest or seed points ahead of a full analysis. **This is
-qualitative visualization only, not a measurement** - the amplification
-distorts motion amplitudes non-linearly and must not be read as displacement.
-
-Configure with `freq_band=(low, high)` in Hz to isolate a suspected mode,
-`amplification` for the gain, and `levels` for the pyramid depth. The
-temporal filter is `filter_type="ideal"` (FFT brick-wall, default) or
-`"butter"` (Butterworth). An optional 2D `mask` restricts amplification to a
-region of interest, leaving the rest of the frame as recorded. `save()`
-writes the result to mp4/avi/mov/gif, mapping the intensity range to 8-bit
-for playback.
-
-The optional `lambda_c` spatial-wavelength attenuation, meant to damp
-amplification of fine, noisy detail while leaving broad structural motion at
-full gain, initially ramped in the wrong direction: the finest pyramid level
-got the strongest amplification and the coarsest the weakest, the reverse of
-what Wu et al. specify. This is now fixed to ramp from the coarsest band down
-to the finest. A warning is also now raised if `lambda_c` ends up attenuating
-every level to zero (the output would then equal the input unchanged), and
-`save()` raises rather than silently defaulting to 30 fps when no frame rate
-is available. The test suite was substantially hardened alongside these
-fixes, including mutation-verified tests that would have caught a disabled
-band-pass, a sign-inverted amplification, or a dropped pyramid band.
-
-### Rigid body motion in `DirectionalLucasKanade`
-
-`DirectionalLucasKanade` gained `set_rigid_body_motion(rbm_ij)`: a per-frame
-`(n_time_points, 2)` array giving a known, prescribed rigid-body translation.
-The tracking window for every point now follows this prescribed motion, and
-the motion is subtracted back out of the result, so `self.displacements`
-reports the local motion relative to the rigid body motion rather than each
-point's absolute pixel position. Only the component of the rigid body motion
-aligned with each point's tracking direction (`dij`) is currently supported.
-If `set_rigid_body_motion` is never called, it defaults to zero and existing
-analyses are unaffected.
-
-The same change also fixes the NumPy-path convergence check: `compute_delta`
-(aliased as `compute_delta_numba`) returned a signed error, but the
-optimizer's stopping test (`error < tol`) assumes a non-negative error, so
-iterations could stop early on a spuriously negative error or fail to
-converge. The error is now returned as its absolute value.
-
-### Fixed
-
-- **`import pyidi` failed outright when PyQt6 was installed without napari.**
-  `pyidi.GUIs` gated every class on PyQt6 alone and then imported the napari
-  `GUI` unconditionally, so `pip install pyqt6 pyqtgraph` without the `[qt]`
-  extra produced a `ModuleNotFoundError` from inside a submodule and took the
-  whole package down with it. Each class now checks its own dependencies:
-  `SelectionGUI`, `SelectionGUIOld`, `ResultViewer` and `Viewer` need PyQt6 and
-  pyqtgraph, the napari `GUI` needs napari and magicgui, and whichever are
-  unavailable become stubs that import cleanly and raise `RuntimeError` on
-  construction naming the missing packages. `Viewer` had no such stub at all
-  and raised `NameError`.
-- **Asymmetric `pad` in `DirectionalLucasKanade` crashed every point.**
-  `_interpolate_reference` and `_warm_up_kernels` paired the `(pad_y, pad_x)`
-  axes in the opposite order to `_padded_slice`, so a non-square `pad` (e.g.
-  `configure(pad=(2, 5))`) built the reference spline over a grid of the
-  wrong shape. All three now use the same axis pairing.
-- **A point already lost before a checkpoint could come back with garbage
-  displacements after resuming.** `failed_points` is rebuilt from scratch on
-  resume and is not itself checkpointed, so a resumed analysis had no record
-  that a point was already `NaN`. `np.round(NaN).astype(int)` is undefined
-  (e.g. `INT64_MIN` on x86, `0` on arm64) rather than raising, so such a point
-  could silently restart tracking from a finite but meaningless position.
-  `LucasKanade` and `DirectionalLucasKanade` now check the previous
-  displacement for NaN/inf before rounding it and keep the point marked
-  failed if so, matching what the compiled kernel already did.
-- **A single untracked point (`NaN`) could break the displacement-vector
-  display.** The napari `GUI` and the Qt `result_viewer` scaled vectors by
-  `np.max`/`np.max(np.abs(...))`, both of which propagate to `NaN` if any
-  point in the result failed to track. They now use `np.nanmax`, with a
-  fallback when every point failed.
-- With `processes` greater than one, warnings about failed points raised
-  inside a worker used worker-local point indices and, under the
-  `forkserver`/`spawn` start methods, might not reach the console at all. The
-  parent process now re-summarises failed points with global indices once
-  the worker results are merged, for both `LucasKanade` and
-  `DirectionalLucasKanade`.
-- **`compute_inverse_numba` and `compute_delta_numba` are importable from
-  `LucasKanade` again.** The 1.4.0 numba rewrite renamed them to
-  `compute_inverse` and `compute_delta`; code importing the 1.3.3 names broke
-  as soon as it hit that import. Both old names are restored as aliases.
-- **Removed points in `SelectionGUIOld` no longer reappear after a recompute.**
-  The `Remove point` tool used to delete from a selection's *derived* points,
-  which were regenerated from the source geometry whenever the subset size or
-  spacing changed, so a removed point could silently come back. Removals are
-  now recorded per selection and re-applied after every recompute.
-- **`SelectionGUIOld`'s brush had its row/column spacing swapped for anisotropic
-  subsets.** For a non-square `subset_size=(height, width)`, the brush laid
-  its grid out with the axes transposed — columns stepped by the height and
-  rows stepped by the width. Square subsets were unaffected. Now fixed.
-- **`Deselect painted area` no longer throws away a whole brush stroke.**
-  Deselecting over any part of a painted region discarded the entire stroke,
-  so nibbling a corner off a large brush selection wiped all of it. The
-  deselect stroke is now subtracted from the painted mask, so only the
-  overlapping area is lost and the rest of the stroke stays; the selection is
-  removed only once nothing is left painted. Because the mask itself is
-  edited rather than its derived points, the deselection also survives a
-  subset-size or spacing change.
-- **`configure(show_pbar=False)` was ignored by `LucasKanade` and `DIC`** when
-  running in a single process; the progress bar was always shown.
-  `DirectionalLucasKanade` already honoured the setting.
+Two controls on that tab also stop being shown when nothing can act on them.
+`Brush radius` appears for the tools that paint, and `Point spacing` for a row
+that lays points out along or inside its shape -- a polygon, line or brush
+stroke in the `points` role. Neither is read otherwise: a `mask` row has its
+points chosen by the selection, so their distance is the separation on the
+other tab, and a `points`-tool row is the coordinates that were clicked. This
+follows what the selector's own settings already did, appearing and
+disappearing with the selector rather than greying out.
 
 ### Point selection consolidated on one window
 
@@ -486,15 +357,18 @@ dead code, one was documented but no longer developed, and the one under active
 development was not reachable from the documented workflow. There is now one.
 
 - **`SubsetSelection` has been removed.** The tkinter widget in
-  `pyidi/GUIs/selection.py` is gone, and `SelectionGUI` replaces it. The name is
-  still importable, but instantiating it raises a `RuntimeError` naming the
-  replacement, so existing scripts fail with an actionable message rather than an
-  `ImportError`. Replace `SubsetSelection(video, roi_size=(21, 21), noverlap=0)`
-  with `SelectionGUI(video, subset_size=21, subset_overlap=0)`.
-- **It became the documented interface.** Five selection methods (grid in a
-  polygon, manual points, along a polyline, brush, and remove-point) plus
-  automatic filtering by Shi-Tomasi corner strength or gradient direction. It
-  requires the Qt extras: `pip install pyidi[qt]`.
+  `pyidi/GUIs/selection.py` is gone. The name is still importable, but
+  instantiating it raises a `RuntimeError` naming the replacement, so existing
+  scripts fail with an actionable message rather than an `ImportError`. Replace
+  `SubsetSelection(video, roi_size=(21, 21), noverlap=0)` with
+  `SelectionGUI(video, subset_size=21, subset_overlap=0)` — the current
+  `SelectionGUI`, which takes the same arguments as the window described here.
+- **It took over as the documented interface, and is itself superseded by the
+  new `SelectionGUI`.** Five selection methods (grid in a polygon, manual
+  points, along a polyline, brush, and remove-point) plus automatic filtering by
+  Shi-Tomasi corner strength or gradient direction — the set the table above
+  maps onto the new window. It requires the Qt extras:
+  `pip install pyidi[qt]`.
 - **Note for `LucasKanade` users:** it can select anisotropic
   subsets again. `subset_size` accepts a scalar or a `(height, width)` pair,
   in the same `(vertical, horizontal)` convention as
@@ -506,26 +380,6 @@ development was not reachable from the documented workflow. There is now one.
   read a `video.reader.mraw` attribute that no longer exists), the unreachable
   `PickPoints` class in `_simplified_optical_flow.py`, and the stray
   `load_analysis copy.py`.
-
-### Point validation
-
-`set_points()` now validates its input instead of accepting almost anything.
-
-- Empty input, non-2-D input, a wrong column count, and coordinates outside the
-  image now raise `ValueError` with a message that says what was wrong. Empty and
-  1-D input previously raised `IndexError: tuple index out of range`; out-of-range
-  and negative coordinates were previously accepted silently, which since 1.4.0
-  surfaced only as a `NaN` result much later.
-- **Sub-pixel points are now rounded to the nearest pixel, with a warning.**
-  Previously the same float input crashed in `SimplifiedOpticalFlow` (used
-  directly as an array index) but was silently truncated *toward zero* in
-  `LucasKanade`, `DirectionalLucasKanade`, and `DIC`. All four now agree, and
-  round rather than truncate.
-- `set_points()` accepts any object exposing a `.points` attribute, so a
-  selection GUI instance can be passed directly. Previously only `SubsetSelection`
-  was recognised, and passing the Qt GUI failed with an opaque error.
-- The napari `GUI` now routes its selections through `set_points()` as well, so
-  points picked in the UI get the same checks as programmatic ones.
 
 ### `SelectionGUIOld` editing
 
@@ -591,71 +445,138 @@ development was not reachable from the documented workflow. There is now one.
   manual points, then all line points, then all grid points, then all brush
   points). No supported use depends on point order.
 
-### Fixed
+### Rigid body motion in `DirectionalLucasKanade`
 
-- **Mouse drags were offset from the cursor by 9 pixels.** The drag handlers read
-  `ev.pos()`/`ev.buttonDownPos()`, which are local to the ViewBox, and passed them
-  to `mapSceneToView()` and `sceneBoundingRect().contains()`, which expect scene
-  coordinates. The click handlers already used `scenePos()` and were correct, so
-  clicking and dragging disagreed. Most visibly this meant the **brush painted
-  about 9 px away from the cursor**, and its bounds check was wrong by the same
-  amount. All drag paths now use `scenePos()`/`buttonDownScenePos()`.
+`DirectionalLucasKanade` gained `set_rigid_body_motion(rbm_ij)`: a per-frame
+`(n_time_points, 2)` array giving a known, prescribed rigid-body translation.
+The tracking window for every point now follows this prescribed motion, and
+the motion is subtracted back out of the result, so `self.displacements`
+reports the local motion relative to the rigid body motion rather than each
+point's absolute pixel position. Only the component of the rigid body motion
+aligned with each point's tracking direction (`dij`) is currently supported.
+If `set_rigid_body_motion` is never called, it defaults to zero and existing
+analyses are unaffected.
 
-### Other
+The same change also fixes the NumPy-path convergence check: `compute_delta`
+(aliased as `compute_delta_numba`) returned a signed error, but the
+optimizer's stopping test (`error < tol`) assumes a non-negative error, so
+iterations could stop early on a spuriously negative error or fail to
+converge. The error is now returned squared, so it is never negative.
 
-- New `pyidi/selection_geometry.py` holds the ROI-grid geometry as pure numpy,
-  with no GUI-toolkit dependency, shared by the napari `GUI` and the selection
-  windows.
-  Its functions do not share one coordinate convention - each docstring states
-  which one it uses, and the tests pin the difference deliberately.
-- `SelectionGUIOld` accepts a numpy array as documented. A 2-D or 3-D array
-  previously raised `AttributeError` because the frame was only set for a
-  `VideoReader`; anything unusable now raises `TypeError`.
-- First tests for the GUI package: `tests/test_selection_geometry.py` and
-  `tests/test_set_points_validation.py` (24 tests).
-- Fixed `README.md`, which told users to call `video.set_points(...)`.
-  `VideoReader` has no such method - points are set on the method object.
+### Eulerian video magnification
 
-## 1.4.0
+New `EulerianMagnifier` class in `pyidi.postprocessing` (also available as a
+functional `eulerian_magnification()` wrapper) adds linear Eulerian Video
+Magnification (Wu et al., SIGGRAPH 2012) as a pre-test visualization tool: a
+Laplacian pyramid decomposition, a temporal band-pass filter applied per
+pyramid level, and linear amplification of the band-passed signal added back
+onto the original. It reveals subtle, often sub-pixel motion directly in the
+raw recording, before any displacement identification is run, so it is useful
+for checking whether (and where) a structure is moving and for picking
+regions of interest or seed points ahead of a full analysis. **This is
+qualitative visualization only, not a measurement** - the amplification
+distorts motion amplitudes non-linearly and must not be read as displacement.
 
-### Lucas-Kanade performance
+Configure with `freq_band=(low, high)` in Hz to isolate a suspected mode,
+`amplification` for the gain, and `levels` for the pyramid depth. The
+temporal filter is `filter_type="ideal"` (FFT brick-wall, default) or
+`"butter"` (Butterworth). An optional 2D `mask` restricts amplification to a
+region of interest, leaving the rest of the frame as recorded. `save()`
+writes the result to mp4/avi/mov/gif, mapping the intensity range to 8-bit
+for playback.
 
-The inner optimization loop is now compiled with `numba` and parallelized over
-points. Measured against 1.3.3 on the same machine, with identical results:
+The optional `lambda_c` spatial-wavelength attenuation, meant to damp
+amplification of fine, noisy detail while leaving broad structural motion at
+full gain, initially ramped in the wrong direction: the finest pyramid level
+got the strongest amplification and the coarsest the weakest, the reverse of
+what Wu et al. specify. This is now fixed to ramp from the coarsest band down
+to the finest. A warning is also now raised if `lambda_c` ends up attenuating
+every level to zero (the output would then equal the input unchanged), and
+`save()` raises rather than silently defaulting to 30 fps when no frame rate
+is available. The test suite was substantially hardened alongside these
+fixes, including mutation-verified tests that would have caught a disabled
+band-pass, a sign-inverted amplification, or a dropped pyramid band.
 
-| case | 1.3.3 | 1.4.0 | speedup |
-| --- | --- | --- | --- |
-| `data_synthetic.cih`, 200 points, 101 frames | 7.94 s | 0.10 s | 77x |
-| synthetic 512x512, 400 points, 150 frames | 21.04 s | 0.24 s | 89x |
-| `data_synthetic.mp4`, 60 points, 10 frames | 2.16 s | 0.06 s | 36x |
+### Example datasets
 
-The compiled path is on by default. `configure(use_compiled_kernel=False)`
-selects the previous NumPy implementation, which is itself faster than 1.3.3
-(about 1.6x, and more on video and image files) because the frame is no longer
-re-read for every point. Results from the two paths agree to floating-point
-round-off. If numba cannot be imported, pyidi falls back to the NumPy
-implementation automatically and warns, rather than failing to import.
+`pyidi.datasets` downloads example recordings from Zenodo on first use and
+caches them in `~/.pyidi/datasets` (or in `PYIDI_DATA_DIR`):
 
-The compiled kernel supports cubic interpolation only; `int_order` other than `3`
-falls back to the NumPy implementation and warns once.
+```python
+video = pyidi.datasets.load_music_box()
+```
 
-### Directional Lucas-Kanade performance
+The first dataset is a high-speed video of a vibrating music-box comb
+([10.5281/zenodo.22105821](https://doi.org/10.5281/zenodo.22105821), CC BY 4.0).
+Only the requested frames are downloaded, using HTTP range requests, so the
+default window costs 404 MiB instead of the 2 GiB of the published excerpt (or
+the 36 GiB of the full recording). An interrupted download is resumed. The new
+`examples/Showcase_music_box.ipynb` walks from the raw video to the notes of
+the comb and to the operating deflection shape of a single tooth.
 
-`DirectionalLucasKanade` now uses the same compiled kernel machinery. The spline
-evaluation is shared with Lucas-Kanade; only the least-squares solve differs,
-because the motion is constrained to one prescribed direction and so has a
-single unknown instead of two. Measured against 1.3.3 on the same machine, with
-identical results:
+A dataset is a dictionary of metadata in the `pyidi.datasets.DATASETS` registry,
+so the next one needs no new code: `list_datasets()` says what is available,
+`load_dataset(name)` loads any of it, and `register_dataset()` accepts a
+recording that is not part of pyidi. The named shortcuts, `load_music_box()` and
+`fetch_music_box()`, remain. What the registry assumes is what every dataset
+published this way has in common — a Zenodo record holding a Photron `cihx`
+header next to an uncompressed `mraw` file of fixed-size frames, so that a
+window can be addressed by byte offset.
 
-| case | 1.3.3 | 1.4.0 | speedup |
-| --- | --- | --- | --- |
-| `data_synthetic.cih`, 120 points, 101 frames | 1.46 s | 0.04 s | 38x |
-| synthetic 512x512, 400 points, 150 frames | 7.46 s | 0.11 s | 65x |
-| `data_synthetic.mp4`, 60 points, 10 frames | 1.25 s | 0.03 s | 41x |
+### Point validation
 
-As for Lucas-Kanade, the frame is now read once per time step instead of once
-per point. That alone makes the NumPy path about 18x faster on video and image
-files; on memory-mapped formats it makes no measurable difference.
+`set_points()` now validates its input instead of accepting almost anything.
+
+- Empty input, non-2-D input, a wrong column count, and coordinates outside the
+  image now raise `ValueError` with a message that says what was wrong. Empty and
+  1-D input previously raised `IndexError: tuple index out of range`; out-of-range
+  and negative coordinates were previously accepted silently, and now that an
+  untrackable point returns `NaN` rather than raising, they would otherwise
+  surface only as a `NaN` result much later.
+- **Sub-pixel points are now rounded to the nearest pixel, with a warning.**
+  Previously the same float input crashed in `SimplifiedOpticalFlow` (used
+  directly as an array index) but was silently truncated *toward zero* in
+  `LucasKanade`, `DirectionalLucasKanade`, and `DIC`. All four now agree, and
+  round rather than truncate.
+- `set_points()` accepts any object exposing a `.points` attribute, so a
+  selection GUI instance can be passed directly. Previously only `SubsetSelection`
+  was recognised, and passing the Qt GUI failed with an opaque error.
+- The napari `GUI` now routes its selections through `set_points()` as well, so
+  points picked in the UI get the same checks as programmatic ones.
+
+### Documentation overhaul
+
+The documentation was restructured around the work done since 1.3.3. New
+pages: Eulerian video magnification, reading a video (all supported formats,
+including `.cine`, and the frame-rate caveats), results and reproducibility
+(where analyses are saved, `load_analysis`, resuming, and what a `NaN` in the
+result means), and an upgrading guide covering `SubsetSelection` ->
+`SelectionGUI`, `use_numba` -> `use_compiled_kernel`, the stricter
+`set_points()` contract, and the pre-1.0 `pyIDI` class.
+
+The API reference gained the pages it was missing: the graphical interfaces
+(`SelectionGUI`, `SelectionGUIOld`, the napari `GUI`, `ResultViewer` and
+`Viewer`), documented from their docstrings with the Qt and napari imports
+mocked so the build needs neither, and `pyidi.tools`, which the contributing
+guide had been using as its worked example of a documented module.
+
+The methods page gained a "choosing a method" comparison, a parameter table
+per method, and a section on prescribed rigid-body motion in
+`DirectionalLucasKanade`. The mode-shape magnification and fiducial-marker
+pages, previously stubs reading "more documentation is coming soon", now
+document the actual API. `CHANGELOG.md` is rendered into the documentation.
+
+Sphinx gained `sphinx-design` (landing-page cards), `myst-parser` (Markdown),
+`napoleon` (the Google-style docstrings in `fiducial.py` render correctly now)
+and `intersphinx` (links into the numpy, scipy and Python documentation). The
+build is warning-free.
+
+Two source-level fixes fell out of writing this: `ResultViewer` documented its
+`displacements` argument as `(n_frames, n_points, 2)` when it indexes it as
+`(n_points, n_frames, 2)` — the shape `get_displacements()` actually returns —
+and `VideoReader.get_frame`'s docstring had a mis-indented field that broke
+its rendering. The old documentation also claimed `load_analysis()` returns
+two values; it returns three (`video, idi, settings`).
 
 ### Behaviour changes
 
@@ -684,10 +605,95 @@ Detection of untrackable points is best effort: a point can return implausible
 values without being flagged, so a result without `NaN` is not proof that every
 point tracked correctly.
 
+### Fixed
+
+- **`import pyidi` failed outright when PyQt6 was installed without napari.**
+  `pyidi.GUIs` gated every class on PyQt6 alone and then imported the napari
+  `GUI` unconditionally, so `pip install pyqt6 pyqtgraph` without the `[qt]`
+  extra produced a `ModuleNotFoundError` from inside a submodule and took the
+  whole package down with it. Each class now checks its own dependencies:
+  `SelectionGUI`, `SelectionGUIOld`, `ResultViewer` and `Viewer` need PyQt6 and
+  pyqtgraph, the napari `GUI` needs napari and magicgui, and whichever are
+  unavailable become stubs that import cleanly and raise `RuntimeError` on
+  construction naming the missing packages. `Viewer` had no such stub at all
+  and raised `NameError`.
+- **Asymmetric `pad` in `DirectionalLucasKanade` crashed every point.**
+  `_interpolate_reference` and `_warm_up_kernels` paired the `(pad_y, pad_x)`
+  axes in the opposite order to `_padded_slice`, so a non-square `pad` (e.g.
+  `configure(pad=(2, 5))`) built the reference spline over a grid of the
+  wrong shape. All three now use the same axis pairing.
+- **A point already lost before a checkpoint could come back with garbage
+  displacements after resuming.** `failed_points` is rebuilt from scratch on
+  resume and is not itself checkpointed, so a resumed analysis had no record
+  that a point was already `NaN`. `np.round(NaN).astype(int)` is undefined
+  (e.g. `INT64_MIN` on x86, `0` on arm64) rather than raising, so such a point
+  could silently restart tracking from a finite but meaningless position.
+  `LucasKanade` and `DirectionalLucasKanade` now check the previous
+  displacement for NaN/inf before rounding it and keep the point marked
+  failed if so, matching what the compiled kernel already did.
+- **A single untracked point (`NaN`) could break the displacement-vector
+  display.** The napari `GUI` and the Qt `result_viewer` scaled vectors by
+  `np.max`/`np.max(np.abs(...))`, both of which propagate to `NaN` if any
+  point in the result failed to track. They now use `np.nanmax`, with a
+  fallback when every point failed.
+- With `processes` greater than one, warnings about failed points raised
+  inside a worker used worker-local point indices and, under the
+  `forkserver`/`spawn` start methods, might not reach the console at all. The
+  parent process now re-summarises failed points with global indices once
+  the worker results are merged, for both `LucasKanade` and
+  `DirectionalLucasKanade`.
+- **Removed points in `SelectionGUIOld` no longer reappear after a recompute.**
+  The `Remove point` tool used to delete from a selection's *derived* points,
+  which were regenerated from the source geometry whenever the subset size or
+  spacing changed, so a removed point could silently come back. Removals are
+  now recorded per selection and re-applied after every recompute.
+- **`SelectionGUIOld`'s brush had its row/column spacing swapped for anisotropic
+  subsets.** For a non-square `subset_size=(height, width)`, the brush laid
+  its grid out with the axes transposed — columns stepped by the height and
+  rows stepped by the width. Square subsets were unaffected. Now fixed.
+- **`Deselect painted area` no longer throws away a whole brush stroke.**
+  Deselecting over any part of a painted region discarded the entire stroke,
+  so nibbling a corner off a large brush selection wiped all of it. The
+  deselect stroke is now subtracted from the painted mask, so only the
+  overlapping area is lost and the rest of the stroke stays; the selection is
+  removed only once nothing is left painted. Because the mask itself is
+  edited rather than its derived points, the deselection also survives a
+  subset-size or spacing change.
+- **`configure(show_pbar=False)` was ignored by `LucasKanade` and `DIC`** when
+  running in a single process; the progress bar was always shown.
+  `DirectionalLucasKanade` already honoured the setting.
+- **`Fiducial.detect_markers()` always failed on its own default.** The
+  constructor stores the recording as an array, but detection required a
+  `list` and raised `ValueError` for anything else, so the only way in was the
+  list returned by `pre_process()` — which is documented as optional. Both an
+  array and a list are now accepted. A recording deeper than 8 bits, which the
+  OpenCV detectors cannot read, now says so instead of failing on an assertion
+  inside OpenCV.
+- **`Fiducial.revert_frames()` returned a frame it could not revert as black
+  rather than as `NaN`.** The result was allocated with the dtype of the video,
+  so the `NaN` marking a frame with no transformation — and the `NaN` border
+  requested for the homography path — was cast to an ordinary pixel value on any
+  integer recording. The result is now float, and a skipped frame is `NaN`
+  throughout.
+- **Mouse drags were offset from the cursor by 9 pixels.** The drag handlers read
+  `ev.pos()`/`ev.buttonDownPos()`, which are local to the ViewBox, and passed them
+  to `mapSceneToView()` and `sceneBoundingRect().contains()`, which expect scene
+  coordinates. The click handlers already used `scenePos()` and were correct, so
+  clicking and dragging disagreed. Most visibly this meant the **brush painted
+  about 9 px away from the cursor**, and its bounds check was wrong by the same
+  amount. All drag paths now use `scenePos()`/`buttonDownScenePos()`.
+
 ### Other
 
 - `numba` now requires at least 0.59.
-- Windows and macOS added to the CI test matrix.
+- Windows and macOS added to the CI test matrix, and Python 3.10, which
+  `requires-python` has claimed all along without testing it.
+- `setup.py` is removed. The build has used hatchling through `pyproject.toml`
+  for several releases, so the file was never executed; it also read a
+  `requirements.txt` that no longer exists and listed only two of the four
+  subpackages, so anything that did execute it would have built a broken
+  package.
+- The PyPI classifiers list every supported Python, rather than 3.10 alone.
 - When `processes` is greater than one, each worker is limited to a single numba
   thread, so process-level and thread-level parallelism cannot oversubscribe the
   CPU. This applies to both Lucas-Kanade methods.
@@ -707,6 +713,21 @@ point tracked correctly.
   workers rather than pickling a copy to each of them.
 - The kernels are compiled once in the parent process before the worker pool is
   created, instead of once per worker.
+- `LucasKanade`'s `compute_inverse_numba` and `compute_delta_numba` are renamed
+  to `compute_inverse` and `compute_delta` by the numba rewrite. Both old names
+  stay importable as aliases, so code written against 1.3.3 keeps working.
 - `DirectionalLucasKanade`'s `compute_delta_numba` is now actually compiled; its
   `@numba.njit` decorator had been commented out. The name stays importable as an
   alias of the new `compute_delta`.
+- New `pyidi/selection_geometry.py` holds the ROI-grid geometry as pure numpy,
+  with no GUI-toolkit dependency, shared by the napari `GUI` and the selection
+  windows.
+  Its functions do not share one coordinate convention - each docstring states
+  which one it uses, and the tests pin the difference deliberately.
+- `SelectionGUIOld` accepts a numpy array as documented. A 2-D or 3-D array
+  previously raised `AttributeError` because the frame was only set for a
+  `VideoReader`; anything unusable now raises `TypeError`.
+- First tests for the GUI package: `tests/test_selection_geometry.py` and
+  `tests/test_set_points_validation.py` (41 tests).
+- Fixed `README.md`, which told users to call `video.set_points(...)`.
+  `VideoReader` has no such method - points are set on the method object.

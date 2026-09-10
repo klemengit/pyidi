@@ -6,6 +6,22 @@ import matplotlib.pyplot as plt
 from scipy.ndimage import affine_transform
 
 class Fiducial:
+    """
+    Remove the rigid-body motion a recording was made through.
+
+    Markers fixed to the moving body are detected in every frame, the
+    transformation from each frame to a reference frame is fitted to the
+    marker coordinates, and that transformation is taken back out -- either
+    from identified coordinates, with :meth:`revert_fiducial`, or from the
+    frames themselves, with :meth:`revert_frames`, before identification.
+
+    The usual order is :meth:`pre_process` (only if the recording is not
+    already 8-bit, which is all the marker detectors read), then
+    :meth:`detect_markers`, :meth:`compute_transformations`, and one of the
+    revert methods. :meth:`uncertainty_analysis` reports how well the markers
+    pinned the transformation down.
+    """
+
     def __init__(self, video):
         """
         Initialize the Fiducial class with a sequence of frames.
@@ -94,6 +110,51 @@ class Fiducial:
 
         return processed_video
     
+    @staticmethod
+    def _as_frame_sequence(video):
+        """
+        Check that ``video`` is something the marker detector can read.
+
+        Accepts either a list/tuple of 2-D frames or a 3-D array, so that the
+        video held by the class can be passed straight to detection without
+        going through ``pre_process`` first.
+
+        Args:
+            video (list of numpy.ndarray or numpy.ndarray): The frames to check.
+
+        Returns:
+            The frames unchanged.
+
+        Raises:
+            ValueError: If the frames are not a usable sequence, or are not
+                8-bit, which is all the OpenCV marker detectors accept.
+        """
+        if isinstance(video, np.ndarray):
+            if video.ndim != 3:
+                raise ValueError(
+                    f"An array of frames must be 3-D (num_frames, height, width), got shape {video.shape}."
+                )
+        elif isinstance(video, (list, tuple)):
+            if not all(isinstance(f, np.ndarray) and f.ndim == 2 for f in video):
+                raise ValueError("A list of frames must hold 2-D NumPy arrays.")
+        else:
+            raise ValueError(
+                f"Video must be a list of 2-D frames or a 3-D NumPy array, got {type(video).__name__}."
+            )
+
+        if len(video) == 0:
+            raise ValueError("Video must be a non-empty list of frames (NumPy arrays).")
+
+        dtypes = {np.asarray(frame).dtype for frame in video}
+        if dtypes != {np.dtype(np.uint8)}:
+            raise ValueError(
+                f"Marker detection needs 8-bit frames, got {', '.join(str(d) for d in sorted(dtypes, key=str))}. "
+                "High-speed recordings are usually deeper than 8-bit; convert them with "
+                "pre_process(clip_range=(min, max)), which scales the given range to 8-bit."
+            )
+
+        return video
+
     def determine_aruco(self, frame):
         """
         Determine the ArUco dictionary used in a given frame.
@@ -147,7 +208,8 @@ class Fiducial:
         Detect fiducial markers in the preprocessed video or original input video.
 
         Args:
-            video (list of numpy.ndarray or None): Optional video to detect markers in. If None, uses self.video.
+            video (list of numpy.ndarray or numpy.ndarray or None): Optional video to detect
+                markers in, as a list of 2-D frames or a 3-D array. If None, uses self.video.
             marker_type (str): One of ["aruco", "apriltag", "charuco", "artoolkit"].
             fiducial_dictionary (str or None): Dictionary name (e.g., for ArUco or AprilTag).
             known_ids (list or None): If provided, only markers with these IDs are considered.
@@ -161,9 +223,8 @@ class Fiducial:
         if video is None:
             video = self.video
 
-        if not isinstance(video, list) or len(video) == 0:
-            raise ValueError("Video must be a non-empty list of frames (NumPy arrays).")
-        
+        video = self._as_frame_sequence(video)
+
         results = []
         frame_success = 0
         total_markers = 0
@@ -444,7 +505,9 @@ class Fiducial:
             use_interpolation (bool): True for bilinear interpolation, False for nearest neighbor.
 
         Returns:
-            np.ndarray: Aligned 3D array of the same shape as data_array.
+            np.ndarray: Aligned 3D float array of the same shape as the video.
+                Frames that could not be reverted, and pixels no part of the
+                original frame maps onto, are NaN.
         """
         if not isinstance(self.video, np.ndarray) or self.video.ndim != 3:
             raise ValueError("'data_array' must be a 3D NumPy array (frames, rows, cols).")
@@ -457,7 +520,11 @@ class Fiducial:
         if len(transformations) != num_frames:
             raise ValueError("Length of 'transformations' must match number of frames in 'data_array'.")
 
-        aligned_frames = np.full_like(self.video, np.nan)
+        # Float, not the dtype of the video: a frame that could not be reverted
+        # is left as NaN, which an integer array cannot hold -- it would cast to
+        # an ordinary pixel value and read as a black frame rather than a
+        # missing one.
+        aligned_frames = np.full(self.video.shape, np.nan, dtype=float)
 
         for i in tqdm(range(num_frames),  dynamic_ncols=True, desc="Reverting frames to reference"):
             M = transformations[i]
@@ -482,8 +549,10 @@ class Fiducial:
                     )
 
                 elif transform_type == "homography":
+                    # Warped as float so that borderValue=NaN survives; on an
+                    # integer frame it would be cast to a real pixel value.
                     aligned_frames[i] = cv2.warpPerspective(
-                        self.video[i], M_inv, (cols, rows),
+                        self.video[i].astype(np.float64), M_inv, (cols, rows),
                         flags=cv2.INTER_LINEAR if use_interpolation else cv2.INTER_NEAREST,
                         borderMode=cv2.BORDER_CONSTANT,
                         borderValue=np.nan

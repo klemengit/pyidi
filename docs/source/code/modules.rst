@@ -21,15 +21,17 @@ These names are importable directly from ``pyidi``:
    * - ``SimplifiedOpticalFlow``, ``LucasKanade``, ``DirectionalLucasKanade``,
        ``DIC``
      - The displacement identification methods.
-   * - ``SelectionGUI``
+   * - :class:`~pyidi.GUIs.feature_selection.SelectionGUI`
      - Interactive point selection (requires the ``[qt]`` extra).
-   * - ``SelectionGUIOld``
+   * - :class:`~pyidi.GUIs.subset_selection.SelectionGUIOld`
      - The 1.3 point-selection window, deprecated and removed in 1.5.
-   * - ``GUI``, ``ResultViewer``, ``Viewer``
+   * - :class:`~pyidi.GUIs.gui.GUI`,
+       :class:`~pyidi.GUIs.result_viewer.ResultViewer`,
+       :class:`~pyidi.GUIs.result_viewer.Viewer`
      - napari and Qt viewers (require the ``[qt]`` extra).
    * - ``load_analysis``
      - Reload a saved analysis from disk.
-   * - ``Fiducial``
+   * - :class:`~pyidi.fiducial.Fiducial`
      - Fiducial-marker tracking and rigid-body compensation.
    * - ``postprocessing``
      - Eulerian video magnification and mode-shape magnification.
@@ -142,6 +144,40 @@ selection can be scripted.
     :members:
 
 .. automodule:: pyidi.selection.pipeline
+    :members:
+
+Graphical interfaces
+--------------------
+
+Each class needs the ``[qt]`` extra, but not the same part of it: the selection
+windows and the viewers are PyQt6 and pyqtgraph, while the napari ``GUI`` needs
+napari and magicgui. A class whose dependencies are missing is replaced by a
+stub that imports cleanly and raises ``RuntimeError`` when constructed.
+
+Only the scripting surface is listed here — the windows are driven by hand, and
+their event handlers are not part of the public API.
+
+.. autoclass:: pyidi.GUIs.feature_selection.SelectionGUI
+    :no-members:
+    :members: get_points, points
+
+.. autoclass:: pyidi.GUIs.subset_selection.SelectionGUIOld
+    :no-members:
+    :members: get_points, points
+
+.. autoclass:: pyidi.GUIs.gui.GUI
+    :no-members:
+
+.. autoclass:: pyidi.GUIs.result_viewer.Viewer
+    :no-members:
+
+.. autoclass:: pyidi.GUIs.result_viewer.ResultViewer
+    :no-members:
+
+Utilities
+---------
+
+.. automodule:: pyidi.tools
     :members:
 
 Saved analyses
