@@ -8,6 +8,7 @@ on:
 permissions:
   contents: write
   packages: write
+  id-token: write
 
 jobs:
   release:
@@ -59,6 +60,3 @@ jobs:
 
     - name: Publish to PyPI
       uses: pypa/gh-action-pypi-publish@v1.14.2
-      with:
-        user: __token__
-        password: ${{ secrets.PYPI_API_TOKEN }}
